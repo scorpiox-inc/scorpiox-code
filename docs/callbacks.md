@@ -7,7 +7,7 @@ You manage callbacks in two places:
 - **The agent**, through the built-in `SetCallback` tool (it schedules, lists, and cancels timers on its own).
 - **You**, through the `/callbacks` slash command and its popup window (view, pause, resume, or clear the active timers).
 
-Source of truth: `sx_tools.c`, `sx_agent.c`, `sx.c`, and `sxui_callbacks.c` at commit `5fd054b`.
+Source of truth: `sx_tools.c`, `sx_agent.c`, `sx.c`, and `sxui_callbacks.c` at commit `24427d8`.
 
 ---
 

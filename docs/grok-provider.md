@@ -4,7 +4,7 @@ Have an xAI Grok Build subscription (SuperGrok / Grok for Work) but no API key? 
 
 This page walks through the **OAuth session login**, how the token is stored and kept fresh, how to switch models and accounts with profiles, and how the Grok provider differs from the standard xAI API-key usage.
 
-Source of truth: `scorpiox-grok-login.c`, `scorpiox-grok-fetchtoken.c`, `scorpiox-grok-refreshtoken.c`, `scorpiox-grok-usage.c`, and `sx_provider_grok.c` at commit `5fd054b`.
+Source of truth: the Grok OAuth provider and the `scorpiox-grok-*` CLI tools at commit `24427d8`.
 
 ---
 
@@ -16,7 +16,7 @@ Source of truth: `scorpiox-grok-login.c`, `scorpiox-grok-fetchtoken.c`, `scorpio
 | **You don't have (or don't want) an xAI API key** | No pay-per-token billing — requests draw on your subscription credits |
 | **Headless / over SSH** | The Grok CLI device-auth flow needs no browser on the same machine |
 
-If you are instead calling xAI with an API key (`XAI_API_KEY` against `api.x.ai`), you don't need this provider at all — set the key and SCORPIOX CODE falls back to it. See [Grok provider vs. xAI API-key usage](#grok-provider-vs-xai-api-key-usage) at the end of this page.
+If you are instead calling xAI with an API key (`XAI_API_KEY` against `api.x.ai`), you don't need this provider at all — set the key and SCORPIOX CODE can use it directly. See [Grok provider vs. xAI API-key usage](#grok-provider-vs-xai-api-key-usage) at the end of this page.
 
 > **Subscription, not API.** The Grok provider authenticates with an OAuth session and uses your account's credit allowance. It does **not** require an `XAI_API_KEY` and does **not** bill per token. The two are different billing models for the same models.
 
@@ -100,10 +100,11 @@ All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile,
 | `PROVIDER` | choice | `claude_code` | Set to `grok` to activate this provider. |
 | `GROK_TOKEN_SOURCE` | choice | `local` | Where to get the OAuth token: `local`, `http` (alias `remote`), `ssh`, `tcp`, or `config`. Use **`local`** for a Grok account you logged into with the Grok CLI. |
 | `GROK_CREDENTIALS_FILE` | text | *(empty)* | Override the path of the local session file. Defaults to `~/.grok/auth.json` (or `$GROK_HOME/auth.json`). Point it at a different file to pin a profile to a specific login. |
-| `MODEL` / `GROK_MODEL` | text | `grok-4.6` | Which model to run. Accepts full `grok-*` model IDs or short names (see [Choosing a model](#choosing-a-model)). |
+| `MODEL` / `GROK_MODEL` | text | `grok-4.6` | Which model to run. `GROK_MODEL` wins over `MODEL` when both are set. Accepts full `grok-*` model IDs or short names (see [Choosing a model](#choosing-a-model)). |
 | `GROK_REMOTE_URL` | text | *(empty)* | Token endpoint, used only when `GROK_TOKEN_SOURCE=http`. |
 | `GROK_SSH_HOST` / `_PORT` / `_USER` / `_PASS` | text | *(empty)* | Used only when `GROK_TOKEN_SOURCE=ssh` — fetch the session file from a remote machine over SSH. |
 | `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` / `TCP_UPSTREAM` | text | *(empty)* | Used only when `GROK_TOKEN_SOURCE=tcp` — fetch the token over a raw TCP socket. |
+| `GROK_HOME` | env | *(empty)* | Environment variable (not a config key) that relocates the session file to `$GROK_HOME/auth.json`. Useful to keep several logins side by side. |
 
 ### Where the token lives
 
@@ -116,7 +117,7 @@ The Grok CLI writes the OAuth tokens to `~/.grok/auth.json` (owner-read-only). O
 The access token from the OAuth session is short-lived by design — but you don't manage that. SCORPIOX CODE handles refresh automatically:
 
 - **Proactive refresh.** Before a token is close to expiring (a 5-minute buffer ahead of its `expires_at`), the provider refreshes the session and reloads the token, so in-flight work never hits an expired credential.
-- **Reactive recovery.** If a request still comes back unauthorized, the provider refreshes once and retries.
+- **Reactive recovery.** If a request still comes back unauthorized (HTTP 401), the provider refreshes once and retries the same request.
 - **Manual refresh.** You can force a refresh any time:
 
 ```bash
@@ -139,7 +140,7 @@ grok login --device-auth              # refresh failed / account changed — re-
 Because a Grok Build subscription is a credit allowance rather than an open-ended API, you can check how much of it you've used. The usage tool hits the same billing backend your subscription reports to:
 
 ```bash
-scorpiox-grok-usage          # pretty: "Weekly limit NN% used  Resets in ..."
+scorpiox-grok-usage          # pretty: "Weekly/Monthly limit NN% used  Resets in ..."
 scorpiox-grok-usage --json   # raw billing JSON
 ```
 
@@ -206,7 +207,7 @@ Use `scorpiox-config` to see resolved values and where each comes from (which ca
 
 ```bash
 scorpiox-config            # open the interactive config editor
-scorpiox-config --verbose  # print key values (PROVIDER, GROK_TOKEN_SOURCE, MODEL, ACTIVE_PROFILE, …) with their source tier
+scorpiox-config --verbose  # print key values (PROVIDER, GROK_TOKEN_SOURCE, MODEL, ACTIVE_PROFILE, ...) with their source tier
 ```
 
 ---

@@ -1,44 +1,61 @@
 # Project Instructions in SCORPIOX CODE: CLAUDE.md and AGENTS.md
 
-Every agent session starts with a blank mind. The only way to make an agent behave the way *your* project needs — the build command, the test convention, "always run the formatter," "do not touch generated files" — is to tell it, in a file, before it does anything. That file is your **project instructions**.
+Give SCORPIOX CODE a single file in your repo and it will follow your build commands, coding style, and non-negotiable rules for every session — without you re-typing them. That file is a **project instructions file**: a plain markdown document checked into source control that the agent reads at startup and treats as instructions that **override its default behavior**.
 
-SCORPIOX CODE reads one project instructions file from your working directory and folds it into what the model sees. This page explains exactly which file wins, how it is injected, why the design keeps your prompt cache warm, and how it compares to Claude Code, the AGENTS.md standard, Cursor, and Aider.
+SCORPIOX CODE reads `CLAUDE.md` and `AGENTS.md`. Both are plain markdown. Pick one, write it once, and it ships with the repo.
 
-Source of truth: the system-prompt assembly in `sx_systemprompt.c` at commit `5fd054b`.
+This page covers how SCORPIOX CODE finds that file, exactly how it lands in the model's context, why the design keeps prompt-cache hits above 99%, and how it lines up with what the rest of the industry does.
 
----
-
-## The one-sentence version
-
-SCORPIOX CODE looks in your current working directory for a `CLAUDE.md`; if that file does not exist it falls back to an `AGENTS.md`. It never merges the two, and `CLAUDE.md` always wins. Whatever it finds is wrapped in a single, stable `<system-reminder>` block that tells the model the instructions override default behavior, and it is cached in memory for the life of the session so your prompt cache does not bust on every turn.
+Source of truth: the system-prompt builder and the config cascade at commit `24427d8`.
 
 ---
 
-## Which file wins
+## The two files, and who wins
 
-SCORPIOX CODE checks the working directory you launch from, in this order:
+SCORPIOX CODE looks for exactly two file names in your **current working directory**:
 
-| Order | File | When it is used |
-|-------|------|-----------------|
-| 1 | `CLAUDE.md` | Always preferred. If it exists, this is the file. |
-| 2 | `AGENTS.md` | Only when `CLAUDE.md` is absent. |
+| File | What it is | Status |
+|------|------------|--------|
+| `CLAUDE.md` | The native project-instructions file | **Checked first.** If it exists, it is used. |
+| `AGENTS.md` | The cross-tool standard (Codex, Jules, Aider, Cursor, Copilot, and 40+ more) | **Fallback only.** Used when `CLAUDE.md` is absent. |
 
-Three consequences fall out of this rule:
+Three rules, no exceptions:
 
-- **`CLAUDE.md` is the primary contract.** If you want your instructions to be authoritative in SCORPIOX CODE, put them in `CLAUDE.md`.
-- **`AGENTS.md` is a fallback, not a second source.** It exists so a repository already committed to the cross-tool `AGENTS.md` standard works out of the box. The moment you add a `CLAUDE.md`, the `AGENTS.md` is ignored.
-- **The two are never merged.** SCORPIOX CODE does not concatenate `CLAUDE.md` and `AGENTS.md`. There is exactly one project instructions file in the prompt. This is deliberate: merging would change what is injected when you add or remove either file, and a stable, single source is what keeps the prompt cache alive.
+1. **`CLAUDE.md` always wins.** If both files exist, SCORPIOX CODE reads `CLAUDE.md` and ignores `AGENTS.md`. It does not merge them.
+2. **Only the current directory is checked.** SCORPIOX CODE does not walk up the folder tree looking for ancestors' files, and it does not auto-load a file from a subdirectory as you work. It reads the one file in the directory you launched from.
+3. **One file, verbatim.** Whatever is in the winning file is included in full. There is no truncation, no summarization, and no second file mixed in.
 
-A few practical notes:
+```text
+repo/
+├── CLAUDE.md      <- loaded (this one wins)
+└── AGENTS.md      <- ignored while CLAUDE.md exists
+```
 
-- **Only the working directory is checked.** SCORPIOX CODE does not walk up the directory tree looking for instructions in parent folders. Launch from the directory that contains the file you want loaded.
-- **One file, one location.** There is no user-wide `CLAUDE.md` and no enterprise layer in this mechanism. Project instructions are per-repo, in the directory you start from.
+> **Which should you write?** If you use only SCORPIOX CODE, `CLAUDE.md` is the native name. If your repo is already shared with Codex, Jules, Aider, Cursor, or Copilot and you do not want to maintain two files, write `AGENTS.md` and drop `CLAUDE.md` — SCORPIOX CODE will pick it up automatically. If you want SCORPIOX CODE to use a specific file, name it `CLAUDE.md`; it takes precedence.
 
 ---
 
-## How the file gets into the model
+## How the file reaches the model
 
-When a project instructions file is found, SCORPIOX CODE reads its contents and wraps them in a `<system-reminder>` block. The block is intentionally structured so the model understands the *weight* of what it is reading:
+SCORPIOX CODE has two places it can carry your instructions, controlled by a single setting. Both are **static**: the text is generated once per session and then held constant for the rest of the conversation.
+
+### Default: the system prompt
+
+With the default configuration, the winning file is wrapped in a header and placed in the model's **system prompt** — the highest-priority slot in the context window, ahead of the conversation.
+
+What the model actually sees looks like this:
+
+```
+# Project Instructions (CLAUDE.md)
+
+Your build/test commands, style rules, and conventions here...
+```
+
+Because it sits in the system prompt, it is the first thing in scope when the model plans an edit, and it stays there for the entire session.
+
+### Alternative: the system-reminder block
+
+You can switch the delivery into a `<system-reminder>` block that is attached to the user-message side of the conversation. In that mode the content is framed explicitly so the model knows the instructions override its defaults:
 
 ```
 <system-reminder>
@@ -47,124 +64,139 @@ As you answer the user's questions, you can use the following context:
 Codebase and user instructions are shown below. Be sure to adhere to these instructions.
 IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.
 
-Contents of /path/to/your/repo/CLAUDE.md (project instructions, checked into the codebase):
+Contents of /your/repo/CLAUDE.md (project instructions, checked into the codebase):
 
 [your file, verbatim]
 
       IMPORTANT: this context may or may not be relevant to your tasks.
-You should not respond to this context unless it is highly relevant to your task.
+      You should not respond to this context unless it is highly relevant to your task.
 </system-reminder>
 ```
 
-Three details in that block matter:
+The `OVERRIDE any default behavior` line is the load-bearing part: it tells the model your file outranks what it would have done otherwise.
 
-- **`# claudeMd`** is a labeled context section, the same shape Claude Code uses. It tells the model this is project-instruction context, not a user turn.
-- **"These instructions OVERRIDE any default behavior"** is the operative line. It is what makes the file a contract rather than a suggestion. Keep your instructions specific and imperative; that is what makes the model actually obey them.
-- **The file is included verbatim, with its real path.** The model can see the full path of the file, which helps it reason about "what this repo's rules are" versus "what the user just asked."
+### What happens when there is no file
 
-### When the reminder appears
-
-The reminder is generated once per session. It can be surfaced two ways depending on configuration:
-
-- **In the system prompt** — the instructions are part of the standing context the model works with.
-- **Prepended to user messages** — when the `user_system_reminder` option is enabled, the same block is prepended to user messages, matching how Claude Code delivers project instructions so behavior stays consistent across providers.
-
-Either way, the *content* is identical across turns. What changes is only where that stable content is placed.
+If neither file exists (or the file is disabled, see below), SCORPIOX CODE sends a minimal placeholder instead of nothing. This is deliberate — it keeps the prompt structure byte-for-byte identical across sessions whether or not you have a file, so the provider's prompt cache still matches. An empty file or a file over the size limit is skipped the same way, with a warning in the logs.
 
 ---
 
-## Why "cache stability" is the whole design
+## Why the design keeps prompt-cache hits above 99%
 
-Prompt caching is how LLM providers let you pay for a long context once and reuse it on every later turn. The cache only works when the beginning of your prompt is **byte-for-byte identical** from one call to the next. If the harness reshuffles the prompt, adds a timestamp to the top, or re-sorts a context list every turn, the cache prefix changes, the provider cannot reuse the cached prefix, and every turn is billed as if it were the first.
+Prompt caching is what keeps a long session fast and cheap. The provider caches the **prefix** of your context. As long as that prefix is identical from one turn to the next, the turn is a cache *read* (a fraction of the cost and latency of a full re-encode). The moment the prefix changes, the cache misses and the whole conversation is re-encoded — the exact thing you are trying to avoid.
 
-SCORPIOX CODE treats project instructions as one of the *stable* parts of the prompt, deliberately:
+Most harnesses rebuild context dynamically: they re-sort tools, re-rank rules by relevance, or splice in a fresh timestamp and directory listing on every turn. That changes the prefix every turn, and the cache keeps busting. SCORPIOX CODE does the opposite, and the difference is the whole feature:
 
-- **Generated once, then cached in memory.** The `<system-reminder>` block is built the first time it is needed and held for the rest of the session. Subsequent turns reuse the exact same bytes.
-- **Never re-sorted or re-merged.** Because only one file is ever loaded (and it is never merged with a second file), there is no list to re-sort and no union to recompute. The block is the same whether it is turn 3 or turn 300.
-- **Invalidate only when you change directories.** The cache is cleared when the working directory changes (for example after a `/cd`), so a new directory's instructions are picked up — and a new directory's prompt prefix is built exactly once, then cached again.
+- **Generated once, then frozen.** The instructions (and the surrounding context block) are built a single time per session and then cached in memory. Every subsequent turn reuses the exact same bytes. The cache is only invalidated when the working directory actually changes, so a `cd` is the one thing that legitimately resets it.
+- **Static framing, not dynamic re-ranking.** Rules are not scored per turn and reordered. The file goes in as-is, in the order you wrote it. A constant prefix is a cache hit.
+- **The placeholder trick.** Even with no file, or with instructions disabled, the slot still exists with a fixed placeholder. "No file" and "file present" both produce a stable prefix shape, so toggling a file in and out does not silently wreck your cache.
 
-The practical payoff: a session that runs for hundreds of turns keeps a **99%+ prompt cache hit rate** on the project-instructions prefix, instead of the near-100% cache-miss you get from a harness that restructures its prompt every turn. You do not manage this. It is the default, and it is why long sessions do not quietly become expensive.
-
----
-
-## Turning it off (and how it is configured)
-
-Project instructions are on by default. You can disable the whole mechanism through configuration: the `include_claudemd` option (config key `PROMPT_INCLUDE_CLAUDEMD`) controls whether the working directory's instructions file is loaded at all. When it is off, SCORPIOX CODE emits a minimal, empty `<system-reminder>` placeholder instead, so the prompt shape stays stable even with instructions disabled.
-
-A file that is empty, or larger than the internal limit, is also skipped — SCORPIOX CODE does not truncate a file silently, it simply does not inject one it cannot fit. If your instructions file is unexpectedly absent from the model's context, check that it is non-empty and within the size limit.
+The practical effect: across a normal interactive session, the instructions contribute **zero** cache churn. You should see cache reads on nearly every turn — in steady state, well over 99%. If your cache hit rate is collapsing mid-session, the cause is almost never the instructions file; it is a prefix that changes elsewhere (a growing, unstable context block). Keep the file, keep the prefix.
 
 ---
 
-## A minimal CLAUDE.md you can paste
+## Configuration
 
-```markdown
-# Project: example-service
+Two settings control project instructions. Both live in your SCORPIOX CODE config (the same `scorpiox-env.txt` style file the rest of the product uses).
 
-## Build
-- `make build` compiles. `make test` runs the suite. There is no npm.
+| Key | Default | What it does |
+|-----|---------|--------------|
+| `PROMPT_INCLUDE_CLAUDEMD` | `1` | Master switch. `0` turns project instructions off entirely — no file is read, and the minimal placeholder is used instead. `1` (default) loads the file. |
+| `USER_SYSTEM_REMINDER` | `0` | Delivery mode. `0` puts the file in the system prompt. `1` attaches it as a `<system-reminder>` block on the user side, framed as an override. |
 
-## Conventions
-- Go: gofmt everything before you finish.
-- Never edit files in `gen/` — they are generated.
-- Tests live next to the code, `_test.go`.
+```ini
+# scorpiox-env.txt (relevant lines)
 
-## Boundaries
-- Do not change the public API in `pkg/api` without flagging it.
-- CI plan is in `.github/workflows/ci.yml`.
+# 1 = load project instructions, 0 = off
+PROMPT_INCLUDE_CLAUDEMD=1
+
+# 0 = system prompt (default), 1 = system-reminder block
+USER_SYSTEM_REMINDER=0
 ```
 
-Keep it to things that must be true in *every* session. If an instruction is a multi-step procedure or only applies to one area of the codebase, it belongs in a skill or a scoped rule, not here. (See the skills page for the on-demand mechanism.)
+You rarely need to touch either. Leave `PROMPT_INCLUDE_CLAUDEMD=1` so the file is loaded, and choose the delivery mode based on how strongly you want the override framing. The system-reminder mode is the more forceful of the two because of the explicit `OVERRIDE any default behavior` line.
+
+> **One file, one directory.** Because SCORPIOX CODE only reads the file in the directory you launch from, a monorepo package that needs its own conventions should carry its own `CLAUDE.md` at that package root — and you should launch SCORPIOX CODE from inside that package.
 
 ---
 
-## How SCORPIOX CODE compares to other harnesses
+## Writing a file that actually gets followed
 
-The industry has converged on two ideas: a **project instructions file** (CLAUDE.md, AGENTS.md, .cursorrules, CONVENTIONS.md) and a **stable place to put it**. Where the harnesses differ is in *how many files*, *how they are combined*, and *how hard they work to keep the prompt cache alive*. Here is the honest side-by-side.
+The file is **context, not enforcement** — the model reads it and weighs it, so how you write it decides how reliably it is followed. Specific, short, and well-structured beats long and vague.
 
-### Claude Code (CLAUDE.md)
+### What to put in it
 
-Claude Code's native instructions file is `CLAUDE.md`. It is more layered than SCORPIOX CODE:
+- Build, run, and test commands the model cannot guess.
+- Non-negotiable conventions (formatter, indentation, naming, error-handling shape).
+- Where things live ("API handlers live in `src/api/handlers/`").
+- Gotchas ("integration tests need Docker running first").
 
-- **Multiple files, merged in load order.** Claude Code supports an enterprise-level file, a project-level file (in the repo, plus files in subdirectories walked up from where you launch), and a user-level file in `~/.claude/CLAUDE.md`. These are combined, so a session can carry several CLAUDE.md files at once.
-- **Tree walking.** Claude Code walks up the directory tree, so a `CLAUDE.md` in a parent directory is loaded in addition to one in the working directory.
-- **AGENTS.md is also supported.** Claude Code can read a repository's `AGENTS.md`, on its own or alongside `CLAUDE.md`.
+### What to keep out
 
-SCORPIOX CODE is intentionally simpler here: **one directory, one file, no tree walking, no merging.** The trade-off is worth understanding. Claude Code's layered model is powerful for large organizations that want enterprise-wide policy plus per-repo rules. SCORPIOX CODE's flat model is easier to reason about and, more importantly, keeps the injected block byte-stable, which is what protects the cache. If you come from Claude Code and keep a `CLAUDE.md` in your repo root, it just works in SCORPIOX CODE.
+- Anything the model already knows from the code.
+- Contradictions. If two rules fight, the model may pick one arbitrarily.
+- Reminders of obvious steps. State the goal and let the model exercise judgment.
 
-### AGENTS.md (the cross-tool standard)
+A file that is easy to scan is a file that gets followed:
 
-`AGENTS.md` is an open, vendor-neutral file proposed as a single predictable place for the context coding agents need — build steps, test commands, conventions — so it does not have to clutter a `README.md`. It is deliberately generic and has been adopted across a wide ecosystem (OpenAI Codex, Google's Jules, Aider, Cursor, VS Code, Devin, Windsurf, GitHub Copilot's coding agent, and many others).
+```markdown
+# Project: acme-api
 
-SCORPIOX CODE supports `AGENTS.md` as its **fallback**, so a repository that standardizes on `AGENTS.md` — or a monorepo where a human contributor already maintains one — works with SCORPIOX CODE with zero changes. The rule is the same as everywhere: if you also drop a `CLAUDE.md` in, the `CLAUDE.md` wins and the `AGENTS.md` is not read.
+## Commands
+- Install deps: `pnpm install`
+- Dev server: `pnpm dev`
+- Run all tests: `pnpm test`
+- Lint: `pnpm lint`
 
-The clean strategy: **if you want to be portable across many agents, keep one `AGENTS.md`; if you want to target SCORPIOX CODE (or Claude Code) specifically, a `CLAUDE.md` is fine and takes priority.**
+## Conventions
+- TypeScript strict mode; single quotes, no semicolons.
+- Handlers live in `src/api/handlers/`.
+- Every endpoint change gets a test. Run `pnpm test` before committing.
+- Integration tests require Docker running: `docker compose up -d`.
 
-### Cursor (.cursorrules / .cursor/rules)
+## Do not
+- Do not commit `.env` or generated `*.lock` changes.
+```
 
-Cursor uses a different shape entirely. Historically it read a single `.cursorrules` file in the project root. It has since moved to a folder-based model: rules live in `.cursor/rules/` as Markdown files (`.mdc`), each with frontmatter that can include **glob patterns** to scope a rule to matching files, and an `alwaysApply` flag for rules that should be present regardless of the open file.
-
-The key difference from SCORPIOX CODE: **Cursor scopes rules per-file via globs, SCORPIOX CODE loads one whole file per session.** Cursor's model is better when you genuinely need different rules for different file types; SCORPIOX CODE's model is better when you want one stable, cache-friendly contract. If you have a `.cursorrules` file you like, its contents are a fine starting point for a `CLAUDE.md`.
-
-### Aider (.aider.conf.yml / CONVENTIONS.md)
-
-Aider's conventions file is `CONVENTIONS.md` in the project root, which Aider loads automatically when present. Aider also reads its settings from `.aider.conf.yml` (and `~/.aider.conf.yml` for user-wide settings) and can be pointed at other files with `--read`. Aider is part of the AGENTS.md-adjacent ecosystem and can load `AGENTS.md` / `CLAUDE.md` as read files.
-
-Compared to SCORPIOX CODE, Aider's convention file is a single root file much like ours, but Aider does not advertise a cache-stability guarantee around it. SCORPIOX CODE's explicit one-time generation and in-memory caching is the difference: the same convention file, but with a hard guarantee that it costs you the same cache hit rate on turn 300 as on turn 1.
-
-### The comparison at a glance
-
-| | File(s) | Multiple files merged? | Tree walking? | Cache-stability guarantee |
-|---|---------|------------------------|---------------|---------------------------|
-| **SCORPIOX CODE** | `CLAUDE.md`, else `AGENTS.md` | No — one file, never merged | No — working directory only | Yes — generated once, cached in memory, 99%+ cache hits |
-| **Claude Code** | `CLAUDE.md` (enterprise / project / user), `AGENTS.md` | Yes — layered and combined | Yes — walks up the tree | Implicit — layered context is stable while files are unchanged |
-| **AGENTS.md standard** | `AGENTS.md` | Varies by adopting tool | Varies | Depends on the adopting harness |
-| **Cursor** | `.cursorrules`, `.cursor/rules/*.mdc` | Yes — many rules, glob-scoped | No | Not emphasized |
-| **Aider** | `CONVENTIONS.md`, `AGENTS.md`/`CLAUDE.md` via `--read` | Read files can be multiple | No | Not emphasized |
-
-The through-line: SCORPIOX CODE does not try to be the most featureful context loader. It tries to be the most **predictable** one, because predictability is what keeps the prompt cache warm, and the prompt cache is what keeps long sessions affordable.
+A few hundred lines is plenty. If a file is getting large, split the concern or tighten it — a bloated file costs context tokens on every turn and dilutes the rules you do want followed.
 
 ---
 
-## Choosing your file, in one paragraph
+## How this compares to other harnesses
 
-Put your project instructions in a `CLAUDE.md` in your repo root if you want to be explicit and have it win unambiguously in SCORPIOX CODE. If your team already maintains an `AGENTS.md` for portability across many agents, keep it — SCORPIOX CODE reads it automatically when no `CLAUDE.md` is present, and a `CLAUDE.md` will simply take over if you add one later. Keep the file to facts that must hold in every session, write them imperative and specific, and you are done: SCORPIOX CODE loads it, wraps it in a stable override block, and keeps it out of the way of your prompt cache for the entire session.
+SCORPIOX CODE's model is deliberately simple: one file, in the working directory, loaded once, frozen for the session. Here is how that stacks against the rest of the field.
+
+| Harness | File / location | Loading behavior | Merging / precedence |
+|---------|----------------|------------------|----------------------|
+| **SCORPIOX CODE** | `CLAUDE.md`, else `AGENTS.md`, in cwd | Loaded once per session; frozen in memory | `CLAUDE.md` wins; **never merged** |
+| **Claude Code** (Anthropic) | `CLAUDE.md` / `.claude/CLAUDE.md`, plus `~/.claude/CLAUDE.md` and org-managed policy | Layered: managed → user → project, walked up the directory tree; subdirectory files load on demand | Multiple files combine; `@import` expansion; `.claude/rules/` for path-scoped rules |
+| **AGENTS.md standard** | `AGENTS.md` at repo root | Adopted by 40+ agents (Codex, Jules, Aider, Cursor, Copilot, Devin, and more) | Single open file; "a README for agents" |
+| **Cursor** | `.cursor/rules/*.mdc` (front-matter scoped) or `AGENTS.md` | Per-rule: always-apply, intelligent (model picks), glob-scoped, or manual `@mention` | Many rules can coexist; `AGENTS.md` is the simple single-file alternative |
+| **Aider** | `CONVENTIONS.md` via `--read` / `.aider.conf.yml` | Loaded as a read-only, cache-friendly chat file | Additive; you choose which files to read |
+
+### The two things worth noticing
+
+**Claude Code is the broadest.** It layers several instruction files (managed policy, user, project), walks the directory hierarchy, supports `@file` imports and path-scoped `.claude/rules/`, and has an auto-memory system that writes its own notes. That is more machinery than most teams need, and it is exactly the kind of dynamic, multi-file, per-turn composition that makes prompt-cache stability harder to reason about. SCORPIOX CODE intentionally does not do all of this: one file, in one place, frozen once.
+
+**SCORPIOX CODE reads the same standard everyone else is converging on.** `AGENTS.md` is the open, cross-tool format, and SCORPIOX CODE treats it as a first-class fallback. That means a repo you maintain for Codex or Aider today gets its instructions honored by SCORPIOX CODE with zero extra files. The one behavioral difference: SCORPIOX CODE does not *merge* `CLAUDE.md` and `AGENTS.md`. It picks one — `CLAUDE.md` if present, otherwise `AGENTS.md` — so there is no ambiguity about which rule wins and no duplicate context.
+
+The shared property across all of these is the design goal itself: a checked-in, predictable file the agent reads before it acts. SCORPIOX CODE's contribution is doing it with the minimum moving parts, and freezing it in memory so the provider's prompt cache stays warm for the whole session.
+
+---
+
+## Migrating from another tool
+
+- **From Claude Code:** copy your `./CLAUDE.md` (or `.claude/CLAUDE.md`) to the repo root as `CLAUDE.md`. SCORPIOX CODE reads the file in the working directory, so drop any reliance on `@import`, directory-tree walking, and `.claude/rules/` — if you need path-scoped guidance, put it in the file for the package you run from.
+- **From a repo that already uses `AGENTS.md`:** nothing to do. Delete `CLAUDE.md` if it exists (otherwise `CLAUDE.md` wins and your `AGENTS.md` is ignored), and SCORPIOX CODE reads `AGENTS.md` directly.
+- **From Aider:** whatever you were pointing at with `--read CONVENTIONS.md`, rename it `AGENTS.md` (or `CLAUDE.md`) at the package root. It is now loaded automatically.
+
+---
+
+## Quick checklist
+
+- [ ] One instructions file at the package root you run SCORPIOX CODE from: `CLAUDE.md` (preferred) or `AGENTS.md`.
+- [ ] Build/test commands, hard conventions, and the gotchas the model cannot guess are all in it.
+- [ ] No contradictions; a few hundred lines max; headers and bullets, not walls of text.
+- [ ] `PROMPT_INCLUDE_CLAUDEMD=1` (default) so the file is actually loaded.
+- [ ] Pick a delivery mode: system prompt (default) or `USER_SYSTEM_REMINDER=1` for the explicit override framing.
+- [ ] Long-running session and cache hits staying above 99% — if they are not, the problem is a changing prefix elsewhere, not this file.

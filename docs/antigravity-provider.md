@@ -4,7 +4,7 @@ Have a Google Antigravity CLI subscription (the free "Antigravity Starter Quota"
 
 This page walks through the **OAuth 2.0 PKCE login**, how the token is stored and kept fresh, how to switch between the two Antigravity models (Gemini and Claude-via-Google), and how Antigravity subscription access differs from the standard Google Cloud API-key provider.
 
-Source of truth: `scorpiox-antigravity-login.c`, `scorpiox-google-fetchtoken.c`, `sx_provider_google_gemini.c`, `sx_provider_google_claude.c`, and `sx_provider_gemini_vertex.c` at commit `5fd054b`.
+Source of truth: `scorpiox-antigravity-login.c`, `scorpiox-google-fetchtoken.c`, `sx_provider_google_gemini.c`, `sx_provider_google_claude.c`, and `sx_provider_gemini_vertex.c` at commit `24427d8`.
 
 ---
 
@@ -65,7 +65,7 @@ A few things worth knowing about this flow:
 
 - **Paste the code or the full URL.** The prompt accepts either the bare authorization code or the whole redirect URL — SCORPIOX CODE extracts the `code=` parameter from a URL for you.
 - **Never share the authorization code.** It's a credential and is single-use. Anyone with the code can bind it to your account.
-- **Re-run with `--force` to re-login.** If a credential already exists, the command refuses to clobber it. Pass `--force` to sign in again and replace the stored refresh token.
+- **Re-run with `--force` to re-login.** Pass `--force` to sign in again and replace the stored refresh token.
 
 ### Account verification gate
 
@@ -146,9 +146,10 @@ scorpiox-antigravity-login --force
 You can also inspect the resolved token without making a model request, for diagnostics:
 
 ```bash
-scorpiox-google-fetchtoken -config    # read GOOGLE_TOKEN_SOURCE from scorpiox-env.txt
-scorpiox-google-fetchtoken -remote    # fetch from the HTTP endpoint
-scorpiox-google-fetchtoken -tcp       # fetch over the raw TCP socket
+scorpiox-google-fetchtoken -local    # fetch from the local refresh-token file
+scorpiox-google-fetchtoken -remote   # fetch from the HTTP endpoint
+scorpiox-google-fetchtoken -tcp      # fetch over the raw TCP socket
+scorpiox-google-fetchtoken -config   # read GOOGLE_TOKEN_SOURCE from scorpiox-env.txt
 ```
 
 The output is a JSON line: `{"ok":true,"email":"...","access_token":"...","project_id":"..."}`. Use it to confirm the token source resolves to the account you expect before a long run.
@@ -218,7 +219,7 @@ Both Antigravity providers accept a short alias or a full model ID, resolved to 
 | any `claude-*` ID | passed through as-is |
 | *(empty)* | `claude-sonnet-4-6` |
 
-Set the model in your profile, or switch it at runtime with the `/model` command. The login-created profiles ship `gemini-3.7-flash-tiered` and `claude-sonnet-4-6` respectively.
+Set the model in your profile, or switch it at runtime with the `/model` command. The login-created profiles ship `gemini-3.7-flash-tiered` and `claude-sonnet-4-6` respectively — those names are passed through as-is because they don't match the built-in aliases above.
 
 ---
 

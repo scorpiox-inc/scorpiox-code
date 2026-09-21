@@ -1,10 +1,10 @@
 # Deterministic File Editing & Developer Autonomy in SCORPIOX CODE
 
-Most AI coding tools make one of two bad bets. They either hand the model a **fuzzy search-and-replace block** and hope the surrounding context matches byte-for-byte, or they force a **full-file rewrite** and let the model retype the entire file, drifting on whitespace, comments, and formatting it never meant to touch. Both paths fail in the same way: the edit you *intended* is not the edit that *lands*, and you find out when the diff is wrong.
+Most AI coding tools make one of two bad bets. They either hand the model a **fuzzy search-and-replace block** and hope the surrounding context matches byte-for-byte, or they force a **full-file rewrite** and let the model retype the entire file, drifting on whitespace, comments, and formatting it never meant to touch. Both paths fail the same way: the edit you *intended* is not the edit that *lands*, and you find out only when the diff is wrong.
 
 SCORPIOX CODE takes a different position: **give the agent exact, deterministic line ranges — and never lock you out of doing it your way.** This page explains how the editing model works, what "deterministic" actually means in practice, and why you are never trapped in a proprietary sandbox.
 
-Source of truth: the built-in `preferred-file-tools` skill and the `scorpiox-readfile`, `scorpiox-editfile`, and `scorpiox-grep` utilities at commit `5fd054b`.
+Source of truth: the built-in `preferred-file-tools` skill and the `scorpiox-readfile`, `scorpiox-editfile`, and `scorpiox-grep` utilities at commit `24427d8`.
 
 ---
 
@@ -15,9 +15,9 @@ The dominant approaches in other harnesses each have a known failure mode:
 | Approach | How it works | Where it breaks |
 |----------|--------------|-----------------|
 | Fuzzy search-and-replace block | Model emits a "context + replacement" snippet; tool finds the context and swaps it | Fails when surrounding context drifts — a renamed variable, a reformatted line, a comment tweak — because the match no longer lines up |
-| Unified diff / patch | Model produces a `@@` hunk with line numbers | Breaks the moment the line numbers or context are off by one; patch tools then reject the hunk or misapply it |
-| Full-file overwrite | Model rewrites the entire file | Silently drops formatting, blank lines, and unrelated code it didn't intend to change; unscalable past a few hundred lines |
-| Proprietary "apply" model | Vendor model regenerates the file from a prompt | Non-deterministic, opaque, and you can't audit exactly what changed line-by-line |
+| Unified diff / patch | Model produces a `@@` hunk with line numbers | Breaks the moment the line numbers or context are off by one; the patch is rejected or misapplied |
+| Full-file overwrite | Model rewrites the entire file | Silently drops formatting, blank lines, and unrelated code it did not mean to change; unscalable past a few hundred lines |
+| Proprietary "apply" model | Vendor model regenerates the file from a prompt | Non-deterministic, opaque, and you cannot audit exactly what changed line-by-line |
 
 The common thread: the *edit boundary is implicit*. The model has to *infer* where its change starts and ends from prose context, and every inference is a place it can be wrong.
 
@@ -27,7 +27,7 @@ SCORPIOX CODE makes the boundary **explicit and numeric**. An agent does not gue
 
 ## Full control: deterministic line ranges
 
-The core primitive is a numbered line range. The workflow is three steps and every step is inspectable before it commits:
+The core primitive is a numbered line range. The workflow is three steps, and every step is inspectable before it commits:
 
 1. **Read with line numbers.** `scorpiox-readfile` prints every line prefixed with its exact line number, so the agent (and you) see the real coordinates in the file rather than an abstract context window.
    ```bash
@@ -59,7 +59,7 @@ The three operations map to the range arithmetic, and all three are unambiguous:
 
 ### Why "deterministic" is doing real work here
 
-- **Line numbers always refer to the original file.** Edits are applied bottom-up (highest line number first), so earlier ranges are never shifted by a later insertion. There is no "now the line number has moved, so the next block is wrong" class of bug.
+- **Line numbers always refer to the original file.** Edits are applied bottom-up (highest line number first), so an earlier range is never shifted by a later insertion. There is no "the line number has now moved, so the next block is wrong" class of bug.
 - **The result is verifiable before you trust it.** `--verify N` re-reads the file and prints the changed lines with `N` lines of surrounding context. If the output is not what you expected, you read again, write a new replacements file, and re-apply. You never have to *assume* the edit landed correctly.
 - **No escaping, no context matching.** Because the target is a numeric range, there is no substring to escape and no surrounding text that has to match. The failures that plague fuzzy edit formats simply have no surface to occur on.
 
@@ -68,7 +68,7 @@ The three operations map to the range arithmetic, and all three are unambiguous:
 Files in the real world are not always plain UTF-8 with Unix line endings. SCORPIOX CODE detects and preserves the file's existing encoding and line endings automatically:
 
 - **Encodings:** UTF-8, UTF-8 with BOM, UTF-16 LE, UTF-16 BE.
-- **Line endings:** CRLF (Windows) and LF (Unix) are detected and preserved, so a Windows checkout does not get silently converted.
+- **Line endings:** CRLF (Windows) and LF (Unix) are detected and preserved, so a Windows checkout is not silently converted.
 
 You are not expected to know or declare any of this. Read it, edit it, and the file comes back in the same encoding with the same line endings it started in.
 
@@ -87,13 +87,13 @@ SCORPIOX CODE ships a built-in `preferred-file-tools` skill that recommends a sm
 
 These are **preferred**, not **required**. That word is the whole philosophy.
 
-The moment a harness says "you *must* use my proprietary Edit tool and nothing else," it has quietly reduced your leverage. You can no longer use the editor, the shell command, or the native utility you already trust — even when your tool would do the job better. You are now inside a sandbox defined by one vendor's abstraction, and every task routes through a format you cannot fully control or audit.
+The moment a harness says "you *must* use my proprietary edit tool and nothing else," it has quietly reduced your leverage. You can no longer use the editor, the shell command, or the native utility you already trust — even when your tool would do the job better. You are now inside a sandbox defined by one vendor's abstraction, and every task routes through a format you cannot fully control or audit.
 
 SCORPIOX CODE does not do that:
 
 - **Standard tools always work.** `sed`, `awk`, `patch`, `git apply`, your editor of choice — all remain available. Nothing is disabled.
 - **Direct shell commands always work.** If the deterministic line-range tool is the right fit, use it. If a one-liner is, use the one-liner. The agent and you decide per task.
-- **Native utilities always work.** Cross-platform, dependency-free, and inspectable.
+- **Native utilities always work.** The preferred tools are cross-platform, dependency-free, and inspectable.
 
 The high-precision tools are an *option that is good at a specific job*. They are not a cage. You keep full control, and the agent keeps full control — without either of you being forced into a lock-in the vendor can tighten later.
 
@@ -104,7 +104,7 @@ The high-precision tools are an *option that is good at a specific job*. They ar
 | Harness | Editing model | What the developer is locked into |
 |---------|---------------|-----------------------------------|
 | **SCORPIOX CODE** | Deterministic numeric line ranges + `--verify`; standard tools always available | Nothing. Preferred tools are optional, not enforced |
-| **Claude Code** | Fuzzy search-and-replace `Edit` tool with required context | A proprietary edit format whose context must match; full control via raw shell is possible but the model is steered toward the built-in tool |
+| **Claude Code** | Fuzzy search-and-replace `Edit` tool with required context | A proprietary edit format whose context must match; raw shell is possible, but the model is steered toward the built-in tool |
 | **OpenCode** | Built-in edit/patch primitives with fuzzy matching | A vendor-defined edit abstraction over your files |
 | **Aider** | Unified diff or whole-file edit formats (model-configurable) | A diff/whole-file format that must regenerate correctly, or the change is lost |
 | **Cursor** | Proprietary apply model that regenerates file content | A black-box "apply" you cannot audit line-by-line |

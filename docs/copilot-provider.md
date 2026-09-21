@@ -1,10 +1,10 @@
 # Using GitHub Copilot CLI Subscription in SCORPIOX CODE
 
-Already paying for GitHub Copilot (Copilot Pro / Pro+ / Business / Enterprise) but you'd rather not juggle API keys? You can use that subscription directly in SCORPIOX CODE. The **Copilot provider** signs you in with a normal GitHub OAuth **device-code login** and runs requests against the same backend your Copilot subscription already pays for — no metering of API tokens.
+Already paying for GitHub Copilot (Pro, Pro+, Business, or Enterprise) but you'd rather not juggle API keys? You can use that subscription directly in SCORPIOX CODE. The **Copilot provider** signs you in with a normal GitHub OAuth **device-code login** and runs requests against the same backend your Copilot subscription already pays for — no metering of API tokens.
 
-This page walks through the **device-code login**, how the token is stored and kept fresh, how to switch accounts, and how the Copilot provider differs from the standard [OpenAI API-key provider](openai-provider.md).
+This page walks through the **device-code login flow**, how the token is stored and kept fresh, how to switch accounts and models with profiles, and how the Copilot provider differs from the standard [OpenAI API-key provider](openai-provider.md).
 
-Source of truth: `scorpiox-copilot-login.c`, `scorpiox-copilot-refreshtoken.c`, `scorpiox-copilot-fetchtoken.c`, `sx_provider_copilot.c`, and `scorpiox-config.c` at commit `5fd054b`.
+Source of truth: the Copilot OAuth login/refresh tools, the Copilot provider implementation, and the config cascade at commit `24427d8`.
 
 ---
 
@@ -14,7 +14,7 @@ Source of truth: `scorpiox-copilot-login.c`, `scorpiox-copilot-refreshtoken.c`, 
 |----------|---------|
 | **You have a GitHub Copilot subscription** | Pro, Pro+, Business, or Enterprise you already pay for |
 | **You don't have (or don't want) an API key** | No pay-per-token billing — requests draw on your subscription |
-| **Headless / over SSH** | The default login flow needs no browser on the same machine |
+| **Headless / over SSH** | The default login flow needs no browser on the machine you run from |
 
 If you are instead calling an OpenAI-compatible API with an API key (`OPENAI_API_KEY` + `OPENAI_BASE_URL`), use `PROVIDER=openai` — see [Using the OpenAI Provider](openai-provider.md).
 
@@ -24,7 +24,7 @@ If you are instead calling an OpenAI-compatible API with an API key (`OPENAI_API
 
 ## Step 1 — Sign in with the device-code flow
 
-The default login is the **device-code flow**, deliberately SSH- and headless-friendly: no browser is required on the machine you're running from, and nothing is pasted back into the terminal.
+The default login is the **OAuth device-code flow**, deliberately SSH- and headless-friendly: no browser is required on the machine you're running from, and nothing is pasted back into the terminal.
 
 ```bash
 scorpiox-copilot-login
@@ -54,17 +54,11 @@ A few things worth knowing about this flow:
 - **The code expires in 15 minutes.** If you don't finish in time, the command times out — just run `scorpiox-copilot-login` again.
 - **Never share the code.** It's a credential. Anyone who has the code (and is watching the terminal) can bind it to your account.
 - **No browser on the box? No problem.** That's the whole point of device-code login. You approve from wherever you're already signed into GitHub.
+- **Denied or expired?** If GitHub reports the authorization was denied or the code expired, re-run the login — the flow starts over cleanly.
 
 ### Overwriting existing credentials
 
-If a credential already exists, the command refuses to clobber it:
-
-```
-Credentials already exist: ~/.copilot/.credentials.json
-Use --force to overwrite.
-```
-
-Pass `--force` to log in again and replace the stored token:
+If a credential already exists, the command refuses to clobber it. Pass `--force` to log in again and replace the stored token:
 
 ```bash
 scorpiox-copilot-login --force
@@ -74,8 +68,9 @@ scorpiox-copilot-login --force
 
 ```bash
 scorpiox-copilot-login --name <account>   # save to ~/.copilot/accounts/<account>.json
-scorpiox-copilot-login --vscode          # VS Code app client (ghu_ / .credentials.json only)
+scorpiox-copilot-login --vscode          # VS Code app client (ghu_ token variant)
 scorpiox-copilot-login --help            # show usage
+scorpiox-copilot-login --version         # show version
 ```
 
 ### Auto-create a `copilot` profile
@@ -104,7 +99,7 @@ MODEL=claude-sonnet-5
 EOF
 ```
 
-Then activate it — persistently or for the session only. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for how profiles resolve across tiers.
+Then activate it — persistently or for the session only (see [Step 2](#step-2---turn-on-the-copilot-provider)).
 
 ---
 
@@ -112,18 +107,14 @@ Then activate it — persistently or for the session only. See [Configuration Ca
 
 Signing in saves the token; you still need to tell SCORPIOX CODE to use it. Set `PROVIDER=copilot`. For a local subscription that's `COPILOT_TOKEN_SOURCE=local`, which reads the file you just created.
 
-```
-PROVIDER=copilot
-COPILOT_TOKEN_SOURCE=local
-MODEL=claude-sonnet-5
-```
-
 Then activate the profile — persistently or for the session only:
 
 ```
 /profile copilot     # persistent — writes ACTIVE_PROFILE, survives restarts
 /use copilot         # session-only — gone when the session ends
 ```
+
+`/profile` and `/use` both trigger a live provider reload, so the new backend and model take effect immediately without a restart. If the new profile fails to initialize, SCORPIOX CODE reverts to the previous one. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for how profiles resolve across tiers.
 
 ---
 
@@ -147,151 +138,127 @@ All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile,
 
 ### Where the token lives
 
-On login, SCORPIOX CODE writes the GitHub OAuth token to `~/.copilot/.credentials.json` (mode `0600`, owner-read-only). With `COPILOT_TOKEN_SOURCE=local`, each request reads from that file. No API key is involved, and no key is ever written.
-
-When the stored token is a VS Code token (`ghu_...`), SCORPIOX CODE exchanges it for a short-lived Copilot JWT and caches that in `~/.copilot/.copilot-token-cache.json`. Both files hold live credentials — keep them owner-read-only.
-
-### Which credential file is read
-
-With `COPILOT_TOKEN_SOURCE=local` (and no `COPILOT_CREDENTIALS_FILE` override), the token helper looks in this order and uses the first file that yields a token:
-
-1. `~/.copilot/config.json` — official Copilot CLI token (`gho_...`)
-2. `~/.copilot/.credentials.json` — VS Code / device-code login token (`ghu_...`)
-3. `~/.config/github-copilot/hosts.json`
-4. `~/.config/github-copilot/apps.json`
-
-So the file written by `scorpiox-copilot-login` is found automatically, and an existing Copilot CLI or VS Code credential in one of the other locations is picked up too. On Windows, `~/.config` resolves to `%LOCALAPPDATA%`.
+On login, SCORPIOX CODE writes the GitHub OAuth token to `~/.copilot/.credentials.json` (mode `0600`, owner-read-only) and, alongside it, a `~/.copilot/config.json` in the shape the official CLI expects. On every request with `COPILOT_TOKEN_SOURCE=local`, SCORPIOX CODE reads from those files. No API key is involved, and no key is ever written.
 
 ---
 
 ## Token persistence and automatic refresh
 
-The GitHub token from the device-code flow is long-lived for VS Code tokens (`ghu_...`), but the per-request Copilot JWT is short-lived by design — and you don't manage that. SCORPIOX CODE handles refresh automatically:
+The token you get from the device-code flow is a long-lived GitHub token, but the per-request credential is a short-lived **Copilot JWT** exchanged from it — and you don't manage that. SCORPIOX CODE handles refresh automatically:
 
-- **Proactive refresh.** When the cached JWT is within 5 minutes of its `expires_at`, the provider re-runs the token exchange and reloads it, so in-flight work never hits an expired credential.
-- **Reactive recovery.** If a request still comes back unauthorized (HTTP 401), the provider refreshes once and retries.
-- **Manual refresh.** You can force a refresh any time:
+- **Proactive refresh.** Before a JWT is close to expiring (a 5-minute buffer ahead of its expiry), SCORPIOX CODE re-exchanges the stored GitHub token for a fresh JWT and reloads it, so in-flight work never hits an expired credential.
+- **Cached exchange.** The exchanged JWT is cached in `~/.copilot/.copilot-token-cache.json` and only re-exchanged when it's about to expire — not on every single request.
+- **Official CLI tokens skip the exchange.** If you supply a `gho_` token via `COPILOT_GITHUB_TOKEN` (or log in with the official CLI identity), SCORPIOX CODE uses it directly as the bearer against the official CLI backend — no JWT minting at all.
+- **Manual refresh / diagnostics.** You can force a refresh or inspect the resolved token without making a model request:
 
 ```bash
 scorpiox-copilot-refreshtoken            # refresh if the token is expired
 scorpiox-copilot-refreshtoken --force    # always refresh
-scorpiox-copilot-refreshtoken --verbose  # show old/new tokens
+scorpiox-copilot-fetchtoken -local       # resolve token from the local credential file
+scorpiox-copilot-fetchtoken -config      # read COPILOT_TOKEN_SOURCE from scorpiox-env.txt
 ```
 
-Because the GitHub token is stored (not a throwaway refresh token), you generally sign in only once. As long as `~/.copilot/.credentials.json` is intact, refreshes happen behind the scenes. If you ever see an "unauthorized" or "token expired" hint, the fix is almost always one of:
-
-```bash
-scorpiox-copilot-refreshtoken --force   # JWT expired — renew it
-scorpiox-copilot-login --force          # token revoked / account changed — re-login
-```
-
-> **Official CLI tokens (`gho_...`) skip the exchange.** If your credential (or `COPILOT_GITHUB_TOKEN`) is a `gho_...` token, SCORPIOX CODE uses it directly as the bearer with the official CLI identity. There is no JWT exchange and no expiry to track.
+Re-login is the fallback: if requests keep coming back unauthorized and a forced refresh doesn't help, re-bind the account with `scorpiox-copilot-login --force`.
 
 ---
 
-## Multi-account: profiles and `scorpiox-config`
+## Multi-account and profile switching
 
-Many people have more than one GitHub account (personal + work, for example). The Copilot provider supports that in two layers: **named credential files** and **named config profiles**.
+Many people have more than one GitHub account (personal + work, for example). The Copilot provider supports that in two layers: **multiple stored logins** and **named config profiles**.
 
-### Save more than one login
+### Store more than one login
 
-By default, `scorpiox-copilot-login` writes to `~/.copilot/.credentials.json`. To keep several accounts side by side, give each a name:
+Each `scorpiox-copilot-login --name <account>` run writes a separate credential file:
 
 ```bash
-scorpiox-copilot-login --name personal     # → ~/.copilot/accounts/personal.json
-scorpiox-copilot-login --name work         # → ~/.copilot/accounts/work.json
+scorpiox-copilot-login --name personal   # → ~/.copilot/accounts/personal.json
+scorpiox-copilot-login --name work       # → ~/.copilot/accounts/work.json
 ```
 
-Each `--name <account>` login saves to `~/.copilot/accounts/<account>.json` instead of the default `.credentials.json`.
-
-### Bind each login to a profile
-
-Now make one profile per account. Point `COPILOT_CREDENTIALS_FILE` at the right file so the profile always uses that account:
+To pin a profile to a specific account, set `COPILOT_CREDENTIALS_FILE` in that profile to the matching file:
 
 ```
-# ~/.claude/scorpiox-env/copilot-personal.txt
-PROVIDER=copilot
-COPILOT_TOKEN_SOURCE=local
-COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/personal.json
-MODEL=claude-sonnet-5
-```
-
-```
-# ~/.claude/scorpiox-env/copilot-work.txt
-PROVIDER=copilot
-COPILOT_TOKEN_SOURCE=local
 COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/work.json
-MODEL=claude-sonnet-5
 ```
 
-### Switch accounts in-session
+Without it, SCORPIOX CODE uses the default `~/.copilot/.credentials.json`.
 
-With those profiles in place, switching accounts is just switching profiles — no re-login, no restart:
+### Switch models and accounts in-session
+
+Switching is just switching profiles — no re-login, no restart:
 
 ```
-/profile copilot-work      # persistent — writes ACTIVE_PROFILE, survives restarts
-/use copilot-personal      # session-only — gone when the session ends
-/profile                  # list available profiles and which is active
-/profile off              # deactivate
+/profile copilot     # persistent — writes ACTIVE_PROFILE, survives restarts
+/use copilot         # session-only — gone when the session ends
+/profile            # list available profiles and which is active
+/profile off        # deactivate
 ```
 
-`/profile` and `/use` both trigger a live provider reload, so the new account and model take effect immediately. If the new profile fails to initialize, SCORPIOX CODE reverts to the previous one. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for the full switching semantics.
+`/profile` and `/use` both reload the provider in place and revert automatically if the new profile can't initialize.
 
 ### Inspect what's actually configured
 
-Use `scorpiox-config` to see resolved values and where each comes from (which cascade tier won):
+Use `scorpiox-config` to see resolved values and where each comes from:
 
 ```bash
 scorpiox-config            # open the interactive config editor
-scorpiox-config --verbose  # print key values (PROVIDER, COPILOT_TOKEN_SOURCE, MODEL, ACTIVE_PROFILE, …) with their source tier
+scorpiox-config --verbose  # print key values (PROVIDER, COPILOT_TOKEN_SOURCE, MODEL, ACTIVE_PROFILE, ...) with their source tier
 ```
-
-`--verbose` shows the resolved `COPILOT_TOKEN_SOURCE`, `COPILOT_MODEL`, and `ACTIVE_PROFILE`, so you can confirm you're pointed at the account you expect before a long run.
 
 ---
 
 ## Choosing a model
 
-`COPILOT_MODEL` (or the generic `MODEL` when `COPILOT_MODEL` is empty) accepts either a full Copilot model ID or a short alias. The mapping at this commit is:
+The Copilot provider accepts a short alias or a full model ID, resolved to a concrete backend model. `COPILOT_MODEL` takes precedence over the generic `MODEL`; the default is `claude-sonnet-5`.
 
-| `MODEL` value | Resolves to |
-|---------------|-------------|
-| *(empty)* | `claude-sonnet-5` (default) |
-| `opus` | `claude-sonnet-5` |
-| `sonnet` | `claude-sonnet-5` |
-| `haiku` | `claude-sonnet-5` |
-| any `claude-*` / `gpt-*` / `gemini-*` / `kimi-*` ID | passed through as-is |
-| anything else | `claude-sonnet-5` (default) |
+| You type | Resolves to |
+|----------|-------------|
+| `opus` / `sonnet` / `haiku` | `claude-sonnet-5` (the only Claude ID verified with tool use) |
+| any `claude-*` ID | passed through as-is |
+| any `gpt-*` ID | passed through as-is |
+| any `gemini-*` ID | passed through as-is |
+| any `kimi-*` ID | passed through as-is |
+| *(empty / unrecognized)* | `claude-sonnet-5` |
 
-Set `COPILOT_MODEL` in your profile or switch it at runtime with the `/model` command. You can also list what your account can actually call with `scorpiox-copilot-models`.
+Set the model in your profile, or switch it at runtime with the `/model` command. You can also list what your account can actually reach:
+
+```bash
+scorpiox-copilot-models              # pretty-print the available model list
+scorpiox-copilot-models --json       # raw JSON to stdout
+```
+
+And check your plan and remaining usage:
+
+```bash
+scorpiox-copilot-usage               # show usage, quota, and plan
+scorpiox-copilot-usage --json        # raw JSON
+```
 
 ---
 
-## Copilot provider vs. the OpenAI API-key provider
+## Copilot vs. the OpenAI API-key provider
 
-It's easy to confuse the two because they both talk to the same families of models. Here's the difference:
+It's easy to confuse the two because they can both run the same models. Here's the difference:
 
-| | **Copilot provider** (this page) | **OpenAI provider** ([openai-provider.md](openai-provider.md)) |
+| | **Copilot** (this page) | **OpenAI-compatible** (`PROVIDER=openai`) |
 |---|---|---|
-| `PROVIDER` value | `copilot` | `openai` |
 | **Authentication** | GitHub OAuth device-code login (`scorpiox-copilot-login`) | `OPENAI_API_KEY` bearer token |
-| **Billing** | Your GitHub Copilot subscription allowance | Pay-per-token API usage (or self-hosted, no billing) |
+| **Billing** | Your GitHub Copilot subscription allowance | Pay-per-token API usage |
+| **Endpoint** | GitHub Copilot backend (subscription) | Any OpenAI-compatible `/v1/chat/completions` |
 | **Token source** | `COPILOT_TOKEN_SOURCE` (local file / remote / ssh / tcp) | `OPENAI_BASE_URL` + `OPENAI_API_KEY` |
-| **Endpoint** | GitHub Copilot backend (`/chat/completions`) | Any OpenAI-compatible `/v1/chat/completions` |
-| **Default model** | `claude-sonnet-5` | `default` (server decides) |
 | **Best for** | People who already pay for GitHub Copilot | Self-hosted servers, Azure, Together, Groq, raw OpenAI API |
 
-Rule of thumb: **you have a Copilot subscription → `copilot`. You have an API key or a self-hosted endpoint → `openai`.**
+Rule of thumb: **you have a Copilot subscription → `copilot`. You have an API key or a self-hosted endpoint → `openai`.** If you use another subscription-backed login, the sibling pages — [Claude Code provider](claude-code-provider.md) and [Codex provider](codex-provider.md) — follow the same device-code pattern for their respective subscriptions.
 
 ---
 
 ## Gotchas
 
-- **`COPILOT_TOKEN_SOURCE` defaults to `local`.** Unlike the Codex provider (which defaults to `tcp`), the Copilot provider looks for a local credential file by default — which is exactly what `scorpiox-copilot-login` writes. If you set it to `remote` / `ssh` / `tcp` without configuring that source, SCORPIOX CODE won't find a token.
-- **The login command and the provider are separate.** `scorpiox-copilot-login` only writes the token file. You still need `PROVIDER=copilot` active (via a profile or `ACTIVE_PROFILE`) for SCORPIOX CODE to use it.
+- **`COPILOT_TOKEN_SOURCE` defaults to `local`.** For a personal subscription you still need to run `scorpiox-copilot-login` first — that's what creates `~/.copilot/.credentials.json`. Without it you'll see a token-load error on the first prompt.
+- **The login command and the provider are separate.** `scorpiox-copilot-login` only writes the credentials and (optionally) the profile. You still need a `copilot` profile active (via `/profile` or `ACTIVE_PROFILE`) for SCORPIOX CODE to use it.
 - **The device code expires in 15 minutes.** Run the login again if you time out. Never share the code — it's a credential.
-- **`.credentials.json` is owner-read-only (`0600`).** Don't loosen the permissions; it holds a live token that stands in for your account.
-- **Named accounts live in `~/.copilot/accounts/`, not `.credentials.json`.** `--name work` writes `~/.copilot/accounts/work.json`. A profile only uses it if `COPILOT_CREDENTIALS_FILE` points there.
-- **Refreshing is automatic, but re-login is the fallback.** If `scorpiox-copilot-refreshtoken --force` keeps failing (token revoked, account or plan changed), do a full `scorpiox-copilot-login --force` to re-bind.
-- **`gho_` vs `ghu_` tokens behave differently.** A `gho_...` token (official CLI) is used directly with no JWT exchange. A `ghu_...` token (VS Code / device-code) is exchanged for a short-lived JWT that SCORPIOX CODE caches and refreshes. Both work; you don't choose which — it's detected from the token.
+- **`~/.copilot/.credentials.json` is owner-read-only (`0600`).** Don't loosen the permissions; it holds the live token that renews your account.
+- **Named accounts live in `~/.copilot/accounts/`, not the default file.** `--name work` writes `~/.copilot/accounts/work.json`. A profile only uses it if `COPILOT_CREDENTIALS_FILE` points there.
+- **`gho_` and `ghu_` behave differently.** An official CLI token (`gho_`, or set via `COPILOT_GITHUB_TOKEN`) is used directly with the official CLI identity — no JWT exchange. A VS Code-style token (`ghu_`) is exchanged for a short-lived Copilot JWT on the default path.
+- **Refreshing is automatic, but re-login is the fallback.** If `scorpiox-copilot-refreshtoken --force` keeps failing (token revoked, account changed, plan changed), do a full `scorpiox-copilot-login --force` to re-bind.
 - **Profile switches are live and safe.** `/profile` and `/use` swap the provider in place and revert automatically if the new profile can't initialize.

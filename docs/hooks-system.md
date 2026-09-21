@@ -4,7 +4,7 @@ SCORPIOX CODE ships with a **folder-based event hook system** that lets you drop
 
 The `scorpiox-hook` CLI handles everything: scaffolding, installing, testing, and listing. The runtime discovers hooks by scanning `.scorpiox/hooks/<event>/` each time an event fires, so you can add or remove hooks between sessions without restarting anything.
 
-Source of truth: `scorpiox-hook.c` at commit `5fd054b`.
+Source of truth: `scorpiox-hook.c` at commit `24427d8`.
 
 ---
 
@@ -231,4 +231,4 @@ The practical effect: if you need "run X when the agent finishes a turn," in Her
 | Run a custom script outside the agent | `scorpiox-hook emit my_event --data '...'` |
 | Gate a sub-agent result before the parent continues | Sync hook on `subagent_complete` |
 
-Hooks are the right tool when the trigger is a **lifecycle event** and the action is **local and fast**. For anything that requires network round-trips, long-running work, or cross-session state, use the [scheduled callback system](/5fd054b/en/callbacks) instead — callbacks are designed for asynchronous, agent-driven loops, while hooks are designed for synchronous, event-driven side effects.
+Hooks are the right tool when the trigger is a **lifecycle event** and the action is **local and fast**. For anything that requires network round-trips, long-running work, or cross-session state, use the [scheduled callback system](/24427d8/en/callbacks) instead — callbacks are designed for asynchronous, agent-driven loops, while hooks are designed for synchronous, event-driven side effects.

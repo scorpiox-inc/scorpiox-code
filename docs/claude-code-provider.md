@@ -4,6 +4,8 @@ Have a Claude subscription (Claude Pro, Max, or a Claude Code seat) but no API k
 
 This page walks through the **OAuth session login**, how the token is stored and kept fresh, how to juggle multiple accounts with profiles, and how the Claude Code provider differs from the standard Anthropic API-key provider.
 
+Source of truth: the Claude Code OAuth provider, the `scorpiox-claudecode-*` CLI tools, and the config cascade at commit `24427d8`.
+
 ---
 
 ## When to use this provider
@@ -37,7 +39,7 @@ Generating PKCE challenge...
 
 Open this URL in your browser to authorize:
 
-  https://claude.com/cai/oauth/authorize?code=true&response_type=code&...
+  https://claude.com/cai/oauth/authorize?code=true&response_type=code&...&code_challenge=...&code_challenge_method=S256
 
 After logging in, paste the authorization code below.
 Code: >
@@ -89,13 +91,9 @@ scorpiox-claudecode-login --name work         # → ~/.claude/accounts/work.json
 
 Each `--name <account>` login saves to `~/.claude/accounts/<account>.json` instead of the default file.
 
----
+### Creating the `claude_code` profile
 
-## Step 2 — Turn on the Claude Code provider
-
-Signing in saves the token; you still need to tell SCORPIOX CODE to use it. Set `PROVIDER=claude_code` and a token source. For a personal subscription that's `CLAUDE_CODE_TOKEN_SOURCE=local`, which reads the file you just created.
-
-The login command offers to create a ready-to-use **`claude_code`** profile for you at the end:
+At the end of a successful login, SCORPIOX CODE offers to write a ready-made profile for you (the prompt is skipped when stdin is not a TTY):
 
 ```
 Create 'claude_code' config profile?
@@ -123,27 +121,45 @@ Then activate it — persistently or for the session only. See [Configuration Ca
 
 ---
 
+## Step 2 — Turn on the Claude Code provider
+
+The provider switches on with `PROVIDER=claude_code`. Because the token source defaults to a shared/remote mode, you also set `CLAUDE_CODE_TOKEN_SOURCE=local` so it reads the file your login just wrote. That's the whole setup for a personal subscription:
+
+```
+PROVIDER=claude_code
+CLAUDE_CODE_TOKEN_SOURCE=local
+```
+
+Activate the profile (or set those keys in any cascade tier / as environment variables) and SCORPIOX CODE connects.
+
+```
+/profile claude_code      # activate this profile for the session and persist it
+```
+
+---
+
 ## Configuration keys
 
 All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile, or as OS environment variables. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for the full cascade and precedence rules.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `PROVIDER` | choice | `claude_code` | Set to `claude_code` to activate this provider. |
+| `PROVIDER` | choice | *(unset)* | Set to `claude_code` to activate this provider. |
 | `CLAUDE_CODE_TOKEN_SOURCE` | choice | `tcp` | Where to get the OAuth token: `local`, `http`, `ssh`, or `tcp`. Use **`local`** for a Claude subscription you logged into with `scorpiox-claudecode-login`. |
 | `CLAUDE_CODE_CREDENTIALS_FILE` | text | *(empty)* | Override the path of the local credential file. Defaults to `~/.claude/.credentials.json`. Point it at a named account (e.g. `~/.claude/accounts/work.json`) to pin a profile to a specific login. |
 | `MODEL` | text | *(empty)* | Which model to run. Accepts full Claude model IDs or short aliases (see [Choosing a model](#choosing-a-model)). |
 | `CLAUDE_CODE_API_URL` | text | `api.anthropic.com` | Host the provider calls. The `/v1/messages?beta=true` path is appended automatically. |
-| `CLAUDE_CODE_PROXY_URL` / `CLAUDE_CODE_PROXY_ENABLED` / `CLAUDE_CODE_PROXY_STRICT` | text / bool / bool | *(empty)* / `true` / `false` | Route requests through a proxy instead of the direct endpoint. |
+| `CLAUDE_CODE_PROXY_URL` | text | `anthropic.scorpiox.net` | Proxy host to route requests through instead of the direct endpoint. |
+| `CLAUDE_CODE_PROXY_ENABLED` / `CLAUDE_CODE_PROXY_STRICT` | bool / bool | `false` / `false` | Enable proxy routing; when strict is off, SCORPIOX CODE falls back to the direct endpoint if the proxy is down. |
 | `CLAUDE_CODE_REMOTE_URL` | text | `https://token.scorpiox.net/claude` | Token endpoint, used only when `CLAUDE_CODE_TOKEN_SOURCE=http`. |
 | `CLAUDE_CODE_SSH_HOST` / `_PORT` / `_USER` / `_PASS` | text | *(empty)* | Used only when `CLAUDE_CODE_TOKEN_SOURCE=ssh` — fetch the token from a remote machine over SSH. |
-| `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` / `TCP_UPSTREAM` | text | *(empty)* | Used only when `CLAUDE_CODE_TOKEN_SOURCE=tcp` — fetch the token over a raw TCP socket. |
+| `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` | text | `203.184.53.244` / `9800` / *(empty)* | Used only when `CLAUDE_CODE_TOKEN_SOURCE=tcp` — fetch the token over a raw TCP socket. |
 
-> **For a personal subscription, you only need three keys:** `PROVIDER=claude_code`, `CLAUDE_CODE_TOKEN_SOURCE=local`, and (optionally) `MODEL`. The `ssh` / `http` / `tcp` sources exist for shared or remote token setups and are not needed for a normal Claude Code login.
+> **For a personal subscription, you only need two keys:** `PROVIDER=claude_code` and `CLAUDE_CODE_TOKEN_SOURCE=local` (plus optionally `MODEL`). The `ssh` / `http` / `tcp` sources exist for shared or remote token setups and are not needed for a normal Claude Code login.
 
 ### Where the token lives
 
-On login, SCORPIOX CODE writes the OAuth tokens to `~/.claude/.credentials.json` under a `claudeAiOauth` section (`accessToken`, `refreshToken`, `expiresAt`, and the granted scopes). On every request it reads from that file via `CLAUDE_CODE_TOKEN_SOURCE=local`. No API key is involved, and no key is ever written.
+On login, SCORPIOX CODE writes the OAuth tokens to `~/.claude/.credentials.json` under a `claudeAiOauth` section (`accessToken`, `refreshToken`, `expiresAt`, and the granted scopes). On every request, `CLAUDE_CODE_TOKEN_SOURCE=local` reads from that file. No API key is involved, and no key is ever written.
 
 ---
 
@@ -152,7 +168,7 @@ On login, SCORPIOX CODE writes the OAuth tokens to `~/.claude/.credentials.json`
 The access token from the OAuth session is short-lived by design — but you don't manage that. SCORPIOX CODE handles refresh automatically:
 
 - **Proactive refresh.** Before a token is close to expiring (a 5-minute buffer ahead of its `expiresAt`), the provider runs the refresh step and reloads the token, so in-flight work never hits an expired credential.
-- **Reactive recovery.** If a request still comes back unauthorized (HTTP 401), the provider refreshes once and retries the request.
+- **Reactive recovery.** If a request comes back with an auth error (HTTP 401/403), the provider refreshes once and retries the request.
 - **Manual refresh.** You can force a refresh any time:
 
 ```bash
@@ -168,11 +184,9 @@ scorpiox-claudecode-refreshtoken --force   # token expired — renew it
 scorpiox-claudecode-login --force          # refresh failed / account changed — re-login
 ```
 
-> **Remote, SSH, and TCP sources** fetch the latest token from the configured endpoint on every request, so their "refresh" is just reading the freshest value the server holds. Only `local` (and the config-file mode) rely on the on-disk refresh token.
+### Checking your subscription usage
 
-### Inspect your subscription usage
-
-Want to see how much of your allowance is left? The usage helper reads your OAuth token and prints the live windows:
+The provider runs against the same usage windows the Claude Code CLI enforces. Check how full they are with:
 
 ```bash
 scorpiox-claudecode-usage            # human-readable summary
