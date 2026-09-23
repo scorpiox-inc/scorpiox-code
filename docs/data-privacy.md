@@ -6,6 +6,8 @@ There is no account to create, no server that knows you exist, and no background
 
 This page explains what that guarantee means in practice, where your data actually lives, and how to verify the whole thing yourself.
 
+Source of truth: `sx.c`, `scorpiox-emit-session.c`, `scorpiox-usage.c`, and `sx_session.c` at commit `6c70ad6`.
+
 > **The whole idea in one line:** your prompts, your code, and your tool output go exactly one place you point them — the model endpoint in your config — and everything else (sessions, logs, history) is a plain folder on your disk that you own outright.
 
 ---
@@ -69,7 +71,7 @@ The only outbound traffic that carries your content goes to the **LLM endpoint y
 | **A self-hosted or on-prem endpoint** | Only to infrastructure you operate. You decide who can see it and how it is logged. |
 | **A vendor API you choose** | Only to the endpoint and vendor you selected, for the request you sent. You opted in to that specific transfer, for that specific call. |
 
-The through-line is control: in every case, the destination is a line in your configuration file, not a hard-coded address the tool reaches for on its own. If you do not point the tool at a remote endpoint, there is no remote endpoint to reach.
+The through-line is control: in every case, the destination is a line in your configuration file, not a hard-coded address the tool reaches for on its own. If you do not point the tool at a remote endpoint, there is no remote endpoint to reach. The full cascade of how that endpoint — and every other setting — gets resolved and layered is documented in [Configuration Cascade and Environment Profiles](scorpiox-env.md).
 
 > **Rule of thumb:** the most private configuration is local inference. Run the model on your own hardware and the "network" your content touches is your own machine.
 
@@ -84,12 +86,7 @@ For the two features that *could* have carried information off-machine, SCORPIOX
 | `USAGE_TRACKING` | `0` (off) | Would report per-call token usage to a usage endpoint. Off by default — nothing is reported unless you turn it on. |
 | `EMIT_SESSION_TRACKING` | `0` (off) | Would stream session events to a session endpoint. Off by default — nothing is streamed unless you turn it on. |
 
-Two things to notice about how these are built:
-
-- **Opt-in, not opt-out.** The default value in the shipped configuration is `0`. You must actively set the value to `1` to enable either one. A feature that is off unless you ask is categorically different from one that is on unless you object.
-- **You choose the destination.** Even when enabled, both are pointed at an endpoint you configure. There is no fixed vendor sink baked in that you cannot redirect.
-
-If you want the guarantee to be *yours*, not ours, this is the place to look. Resolve your effective configuration and confirm both keys are `0`. When they are, the only network path with your content in it is the model endpoint you set.
+Both are `0` out of the box, and neither sends anything until you explicitly set it to `1`. That is the entire telemetry surface of the product, and it is closed by default.
 
 ---
 
@@ -132,3 +129,7 @@ The guarantee has a cost, and it is worth naming it honestly:
 - **No vendor-side audit trail.** There is no central log of "what users did," because there is no central place to log it. Accountability for the data is yours, not ours.
 
 These are the trade-offs of putting ownership where it belongs. For a tool that handles your actual source code, the exchange is usually worth it: **the strongest privacy guarantee is the one where there is no one to leak, nothing to subpoena from a vendor, and no data to be breached — because the data is, and only is, on the machine you control.**
+
+---
+
+*Docs for SCORPIOX CODE @ 6c70ad6*
