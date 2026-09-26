@@ -4,7 +4,7 @@ Have a Google Antigravity CLI subscription (the free "Antigravity Starter Quota"
 
 This page walks through the **OAuth 2.0 PKCE login**, how the token is stored and kept fresh, how to switch between the two Antigravity models (Gemini and Claude-via-Google), and how Antigravity subscription access differs from the standard Google Cloud API-key provider.
 
-Source of truth: `scorpiox-antigravity-login.c`, `scorpiox-google-fetchtoken.c`, `sx_provider_google_gemini.c`, `sx_provider_google_claude.c`, and `sx_provider_gemini_vertex.c` at commit `6c70ad6`.
+Source of truth: `scorpiox-antigravity-login.c`, `scorpiox-google-fetchtoken.c`, `sx_provider_google_gemini.c`, `sx_provider_google_claude.c`, and `sx_provider_gemini_vertex.c` at commit `b59223a`.
 
 ---
 
@@ -65,7 +65,7 @@ A few things worth knowing about this flow:
 
 - **Paste the code or the full URL.** The prompt accepts either the bare authorization code or the whole redirect URL — SCORPIOX CODE extracts the `code=` parameter from a URL for you.
 - **Never share the authorization code.** It's a credential and is single-use. Anyone with the code can bind it to your account.
-- **Re-run with `--force` to re-login.** If a credential already exists, the command refuses to clobber it. Pass `--force` to sign in again and replace the stored refresh token.
+- **Re-run with `--force` to re-login.** Pass `--force` to re-run the flow and overwrite the stored refresh token for your account. This is also the recovery path when a stored credential goes stale.
 
 ### Account verification gate
 
@@ -114,9 +114,9 @@ All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile,
 | `GOOGLE_PROJECT_ID` | text | *(empty)* | Companion GCP project. Empty falls back to the shared consumer project — leave it empty for a plain Google account. |
 | `GOOGLE_ACCOUNTS_FILE` | text | *(empty)* | Override the credentials file path. Defaults to `~/.config/google-accounts/antigravity_accounts.json`. |
 | `GOOGLE_REMOTE_URL` | text | *(empty)* | Token endpoint, used only when `GOOGLE_TOKEN_SOURCE=remote`. |
-| `GOOGLE_GEMINI_MODEL` | text | *(empty)* | Gemini model for `PROVIDER=google_gemini`. Empty resolves to the built-in default. Accepts short names (`opus`, `sonnet`, `haiku`) or a full `gemini-*` ID. |
+| `GOOGLE_GEMINI_MODEL` | text | *(empty)* | Gemini model for `PROVIDER=google_gemini`. Empty resolves to the built-in default. Set a full `gemini-*` ID to target a specific model. |
 | `GOOGLE_GEMINI_MAX_RETRIES` | int | `5` | Maximum retry attempts for transient errors (HTTP 429, 500, 502, 503, 529) with exponential backoff. Set to `0` to disable retry entirely. |
-| `GOOGLE_CLAUDE_MODEL` | text | *(empty)* | Claude model for `PROVIDER=google_claude`. Empty resolves to `claude-sonnet-4-6`. Accepts short names (`opus`, `sonnet`, `haiku`) or a full `claude-*` ID. |
+| `GOOGLE_CLAUDE_MODEL` | text | *(empty)* | Claude model for `PROVIDER=google_claude`. Empty resolves to `claude-sonnet-4-6`. Accepts short aliases (`opus`, `sonnet`, `haiku`) or a full `claude-*` ID. |
 | `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` | text | *(empty)* | Used only when `GOOGLE_TOKEN_SOURCE=tcp` — fetch the token over a raw TCP socket. |
 
 > **For a personal subscription you only need two keys:** `PROVIDER=google_gemini` (or `google_claude`) and `GOOGLE_TOKEN_SOURCE=local` — the login-created profiles already set both. The `remote` and `tcp` sources exist for shared or remote token setups and are not needed for a normal Antigravity login.
@@ -147,6 +147,7 @@ scorpiox-antigravity-login --force
 You can also inspect the resolved token without making a model request, for diagnostics:
 
 ```bash
+scorpiox-google-fetchtoken -local     # fetch from the local refresh-token file
 scorpiox-google-fetchtoken -config    # read GOOGLE_TOKEN_SOURCE from scorpiox-env.txt
 scorpiox-google-fetchtoken -remote    # fetch from the HTTP endpoint
 scorpiox-google-fetchtoken -tcp       # fetch over the raw TCP socket
@@ -201,13 +202,15 @@ Both Antigravity providers accept a short alias or a full model ID, resolved to 
 
 `PROVIDER=google_gemini` (`GOOGLE_GEMINI_MODEL`):
 
+The Gemini backend maps short aliases to a single live Cloud Code Assist model, so the aliases are interchangeable rather than a fast/mid/slow ladder:
+
 | Value | Resolves to |
 |-------|-------------|
-| `opus` / `pro` | `gemini-3.1-pro-preview` |
-| `sonnet` / `flash` | `gemini-3-flash-preview` |
-| `haiku` | `gemini-3.1-flash-lite-preview` |
+| `opus` / `pro` / `sonnet` / `flash` / `haiku` | `gemini-3.8-flash-high` |
 | any `gemini-*` ID | passed through as-is |
-| *(empty)* | `gemini-3.1-pro-preview` |
+| *(empty)* | `gemini-3.8-flash-high` |
+
+Pass a full `gemini-*` ID (for example `gemini-3.8-flash-high`) whenever you want a specific model.
 
 `PROVIDER=google_claude` (`GOOGLE_CLAUDE_MODEL`):
 
@@ -219,7 +222,7 @@ Both Antigravity providers accept a short alias or a full model ID, resolved to 
 | any `claude-*` ID | passed through as-is |
 | *(empty)* | `claude-sonnet-4-6` |
 
-Set the model in your profile, or switch it at runtime with the `/model` command. The login-created profiles ship `gemini-3.7-flash-tiered` and `claude-sonnet-4-6` respectively.
+Set the model in your profile, or switch it at runtime with the `/model` command. The login-created profiles ship `gemini-3.7-flash-tiered` (Gemini) and `claude-sonnet-4-6` (Claude) respectively — full model IDs that pass straight through to the backend.
 
 ---
 

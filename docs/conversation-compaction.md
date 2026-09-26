@@ -1,145 +1,183 @@
 # Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture
 
-A long-horizon agent task — migrating a module across versions, refactoring a service over a weekend, driving a multi-day integration test loop — runs for **hours** across **hundreds of turns**. The model's context window is a finite buffer. No matter how clever the agent is, the transcript of everything it has read, done, and said will eventually exceed what the provider will accept in a single request.
+Agents that run for hours across hundreds of turns run into a hard wall: the context window. Every message, tool call, and result the agent has produced stays resident in the model's working set, and once you hit the limit you have to decide what to do with all of that history.
 
-Every agent harness has to solve this. Some of them solve it by throwing information away. SCORPIOX CODE solves it by refusing to throw anything away.
+Most agent harnesses solve this the same way: they **summarize** the conversation into a shorter text and drop the original. SCORPIOX CODE solves it differently — it treats the conversation as **data that lives on your filesystem**, and lets the agent go back and read it whenever it wants.
 
-Source of truth: `sx.c`, `sx_agent.c`, `sx_session.c`, `sx_slashcmd.c`, and `sxui_resume.c` at commit `6c70ad6`.
-
----
-
-## The problem: context is a finite, expensive, and lossy buffer
-
-Three facts make long-horizon agent work hard:
-
-1. **The window is finite.** Each provider has a hard input limit (typically 200K to 1M tokens). Once the prompt — system prompt + tools + full conversation — exceeds it, the request is rejected. There is no "just keep going."
-2. **Tokens are money and time.** Re-sending the full transcript every turn multiplies cost and latency linearly with conversation length. A 300-turn session that keeps the full history in-context is paying for 300 copies of the history, forever.
-3. **The agent needs the past.** A competent agent mid-task needs to remember what it already tried, which files it already changed, what error strings it has seen. If the past disappears, the agent re-explores, re-reads, re-derives, and eventually re-does work.
-
-A naive fix — just make the window bigger — only delays the problem. A better fix has to satisfy all three: stop paying for the full history in-context, stop being rejected by the provider, and let the agent still reach the full history when it needs it.
-
-Different harnesses satisfy these constraints in very different ways.
+This page explains the long-horizon problem, the two families of solutions, and how SCORPIOX CODE's filesystem-native sessions (`/compact` and `/resume`) work in practice.
 
 ---
 
-## How other harnesses do it: lossy in-memory summaries
+## The fundamental challenge: long-horizon agent tasks
 
-Most popular coding agents — OpenCode, Codex, Claude Code, Pi, Hermes — converge on the same design when context gets close to the limit:
+A "long-horizon" task is one that does not fit in a single context window. Migrations across many files, large refactors, multi-stage builds and deploys, research that reads dozens of sources, or an agent that polls a job and keeps working overnight — all of these cross hundreds of turns.
 
-1. **Detect overflow.** Track token usage. When the count approaches the usable limit, mark the session for compaction.
-2. **Call the model to summarize the conversation.** A dedicated compaction prompt is sent with the current transcript. The model returns a structured Markdown summary — objectives, work state, files touched, blockers, next steps.
-3. **Replace the history with the summary.** The transcript is discarded from the in-memory prompt. The summary is injected as the new "first message" so the model can keep going.
-4. **Repeat.** Every time the limit is hit again, the model is asked to *merge* the old summary with the new conversation, producing a new, still-lossy summary.
+Every turn adds tokens to the context window:
 
-OpenCode and Codex implement this almost identically: a compaction summary part is produced by a "compaction agent" running the same model, the prior summary is discarded and re-absorbed into the next, and the previous messages are dropped from the live context. Claude Code, Pi, and Hermes follow the same summarizer-pass pattern with the same structural outcome.
+- The user's messages.
+- The agent's responses.
+- Every tool call the agent made and its arguments.
+- Every tool result the agent read back (file contents, command output, HTTP responses).
 
-The result is **lossy**. The summary is whatever the model chose to keep. Exact error strings, exact shell commands, exact diff hunks, the user's precise phrasing from turn 47 — any of these that the summarizer did not write down are **gone**. The next compaction can only summarize what the previous compaction already lost. After two or three compactions, the agent is operating on a compressed copy of a compressed copy.
+Tool results are the biggest contributors. A single `grep` over a repo or a `cat` of a generated file can push in tens of thousands of tokens. After a few hundred turns the window is full, and the model can no longer see its earlier work. At that point the harness must either stop, or it must shrink what it is sending.
 
-That is not a bug. It is the fundamental constraint of the design: the only place the "real" conversation ever existed was in the provider's request body, and the provider did not keep it for you.
+The question is *how* it shrinks.
 
 ---
 
-## How SCORPIOX CODE does it: sessions are files, and files do not lie
+## The mainstream answer: lossy in-memory summaries
 
-SCORPIOX CODE makes a different architectural choice: **a session is a folder on disk, and the conversation is just a file in that folder.**
+Nearly every mainstream harness — OpenCode, Codex, Claude Code, and the open agent projects like Pi and Hermes — handles the wall the same way. When the context window nears its limit, they call the model (or a cheaper "summarizer" model) and ask it to **compress the whole conversation into a summary**. That summary is then injected back into the context as if it were a new message, and the original messages are discarded from the window.
 
-Every session lives in a directory under `.scorpiox/sessions/`. The session ID is human-readable — a date plus a short adjective and noun, for example `2026_09_21_quiet_euler`. Inside that folder:
+The shape is the same everywhere. OpenCode, for example, runs a dedicated summarizer prompt against the message list, takes the returned text, stores it as a `SummaryMessageID`, and from that point only the messages *after* the summary marker are re-sent. The old messages are still on disk, but the model is no longer shown them.
 
-| File or directory | Contents |
-|------|----------|
-| `conversation.json` | **The full, verbatim transcript** — every user message, every assistant reply, every tool call with its complete input, every tool result with its complete output, including the model's thinking blocks. Written to disk after every turn. |
-| `events.jsonl` | Structured, append-only event log — session start, session swap, compaction, resume, and task outcomes. |
-| `events/` | Individual event files, numbered in sequence (`000001.json`, ...), mirroring the event log. |
-| `meta.json` | Session metadata — model, provider, start time, and a summary written at session end. |
-| `agent.log` | Agent-level log — the running narrative of the session. |
-| `session.log` | General debug/info/error log output. |
-| `trace.jsonl` | Data-flow trace of agent operations. |
-| `config-snapshot.txt` | A frozen copy of the active configuration at session start, so the session is reproducible. |
-| `traffic/` | Raw HTTP request/response captures (when traffic logging is enabled). |
-| `messages/` | Per-message emit files (`msg_0001_info.txt`, `msg_0004_tools.txt`, ...) for SDK and tool consumers. |
-| `inbox/` | Inbound message queue for the session. |
-| `required_skills.txt` | Skills the session depended on; carried forward automatically on compaction. |
+The problem with this approach is that a summary is **lossy and irreversible**:
 
-The key file is `conversation.json`. It is the **complete, unmodified** record of everything that happened. No summarization pass, no LLM rewriting, no truncation. The exact words the agent said, the exact commands it ran, the exact code it wrote, the exact error text the provider returned.
+- **Exact content is lost.** The summary says "edited the parser to handle edge cases." It does not preserve the actual diff, the exact line numbers, or the failing test output. When the agent needs those specifics later, they are gone.
+- **Commands and paths are paraphrased.** The precise command that was run, the exact flag, the temporary path — these get generalized into prose.
+- **Nuance collapses.** Decisions, "we tried X and it failed because Y" reasoning, and the *why* behind choices are the first things a model drops when told to be concise.
+- **It is one-directional.** Once the original messages are out of the window, the agent cannot recover them by asking. It has to work from the summary.
 
-This single architectural choice changes everything about long-horizon tasks:
+For short tasks this is fine. For a long-horizon task where, two hundred turns later, the agent needs the exact error message it saw at turn forty, the summary has already forgotten it.
+
+---
+
+## The SCORPIOX CODE answer: filesystem-native sessions
+
+SCORPIOX CODE takes a different position. A session is not a blob of in-memory text that you occasionally compress. **A session is a persistent folder on your filesystem**, and the full, verbatim record of everything that happened lives in that folder.
+
+Every session gets its own directory under `.scorpiox/sessions/<session-name>/`. The session name is human-readable and dated (for example `2026_09_26_quiet_lantern`), so you can tell sessions apart at a glance.
+
+When the context window fills up, SCORPIOX CODE does not summarize and discard. It **closes the current session — preserving everything — and starts a fresh one with an empty context**. The old session is still sitting on disk, in full, and the agent is told exactly where to find it.
 
 | | Lossy in-memory summary | Filesystem-native session |
 |---|---|---|
-| **Where the transcript lives** | Only in the provider request body | On your disk, in your repo's `.scorpiox/` folder |
-| **Survives process exit** | No | Yes — forever |
-| **Survives compaction** | No — replaced by a summary | Yes — the file is untouched |
-| **Survives restart** | No | Yes — `/resume` reads it back |
-| **Searchable** | No (it is gone) | Yes — `grep`, `jq`, or open in any editor |
-| **Verifiable** | No (the model's claim about its own past) | Yes — the bytes are the bytes |
-| **Auditable** | No | Yes — `events.jsonl` and `agent.log` are first-class |
-| **Cost per turn** | Full transcript re-sent every turn | Only what the agent chooses to read back |
+| **What happens at the limit** | Conversation is compressed into a summary; originals dropped from context | Session is sealed to disk; a fresh, empty session starts |
+| **Original messages** | Lost from context, paraphrased into prose | Preserved **verbatim** on disk |
+| **Exact code, commands, errors** | Paraphrased or dropped | Preserved exactly, readable on demand |
+| **How the agent gets history back** | It cannot — the summary is all it has | It reads the old session files with its normal tools |
+| **Token cost of a fresh session** | Carries the summary blob | **Zero** — starts clean |
+| **Recoverability** | One-way; detail is permanently gone | Two-way; any session can be re-opened anytime |
 
-The transcript is not "a cache of the context." The transcript **is** the record, and the context window is just a working scratchpad on top of it.
+The key insight: **the model's context window is not the archive.** The archive is the disk. The context window is just the working set you are currently looking at, and the filesystem is where the complete, lossless record lives.
 
 ---
 
-## Compaction in SCORPIOX CODE: a session swap, not a summary
+## What a session folder actually contains
 
-When SCORPIOX CODE's context usage crosses the threshold, it does **not** ask the model to summarize the conversation. It does something structurally different:
+Each session is a self-contained folder. The full conversation transcript, every tool call and result, the raw network traffic, logs, and a small machine-readable metadata file all live side by side:
 
-1. **Detect the threshold.** The agent tracks live usage. The effective token count is the *larger* of the provider's cached-read and raw input token counts, so the check adapts to how each provider reports usage. When that count reaches the threshold, a warning is raised.
-2. **Prompt the user** (optional). If the prompt is enabled, SCORPIOX CODE asks what to do:
-   - **Continue compaction** — start a fresh session with a plan.
-   - **Reject compaction** — keep the current session as-is.
-   - **Resize the context window** — raise the threshold (for example to `500K`) and keep going instead of compacting. The default resize doubles the current threshold, capped at 2000K. You can also resize at any time with `/context_resize 500K`.
-3. **Save the current session to disk.** The current `conversation.json` is flushed. The session folder is now a complete, self-contained artifact.
-4. **Start a fresh session.** A new session folder is created (for example `2026_09_21_quiet_euler` becomes `2026_09_21_warm_hamilton`), and the agent is pointed at the old folder:
+| Path in the session folder | What it holds |
+|---|---|
+| `conversation.json` | The **complete, verbatim** conversation — every user message, assistant response, tool call, and tool result, in order. Nothing is summarized. |
+| `traffic/` | Raw HTTP request/response data for the provider calls, for when you need to inspect exactly what went over the wire. |
+| `events.jsonl` | A structured event stream (one JSON line per event) for tooling and external consumers. |
+| `session.log`, `agent.log` | Human-readable logs for the session and the agent loop. |
+| `trace.jsonl` | Step-by-step trace of the agent's execution. |
+| `meta.json` | Session metadata — start time, working directory, model, and provider — written at session start. |
+| `stats.json` | Live telemetry (token usage, timing), updated as the session runs. |
+| `required_skills.txt` | Skills the session needed, carried forward automatically when you compact or resume. |
+| `config-snapshot.txt` | The active configuration at the time, so a session is reproducible. |
 
-   > "Your previous session was compacted due to context size limits.
-   > Previous session data is preserved at `.scorpiox/sessions/<old>/`.
-   > To understand what was being worked on: read `.scorpiox/sessions/<old>/conversation.json` for full conversation history, and `.scorpiox/sessions/<old>/traffic/` for raw request/response data. Focus especially on the last ~20 messages.
-   > Enter plan mode now. Create a detailed plan of what was being worked on, what has been completed, and what remains. Then continue."
+None of this is a summary. `conversation.json` is the conversation, in full. That is what makes the rest of this design possible: because the record is complete and on disk, the agent can go back to it with the same tools it uses on any other file.
 
-5. **The agent reads what it needs.** The fresh session starts with **zero token bloat** — the new context window is essentially empty. The agent decides, using the same shell tools it would use on any other filesystem, what to read back. Usually that is a `grep` on the old `conversation.json`, a `head` or `tail` of the last N messages, or a targeted `jq` for the file paths it already touched.
-
-The compaction is **lossless** because nothing was summarized. The "compact" step is just *moving the working set from the in-memory prompt to the disk*, where it was already, in full, the whole time.
-
-The key insight: **the context window is not the source of truth.** The filesystem is. The agent's job is to decide what to keep in the window, not to lose what is not.
+> **Sessions are git-ignored by default.** SCORPIOX CODE adds `.scorpiox/sessions/` to `.gitignore` when applicable, so your session history is local by default and does not get swept into a commit.
 
 ---
 
-## Resumption: `/resume` restores any session, directly from disk
+## The agent decides, and explores freely
 
-The `/resume` command is the other half of the architecture.
+This is the part that separates the two approaches in everyday use.
 
-- **`/resume`** (no arguments) opens a picker overlay. SCORPIOX CODE scans `.scorpiox/sessions/`, reads each session's metadata, and shows a scrollable list — session name, model, provider, first user message preview, and timestamp — newest first.
-- **`/resume <session-name>`** skips the picker and resumes that session directly. The name can be an exact session ID, an exact short name, or a substring — `zen` matches `2026_09_21_zen_johnson`. Exact IDs win, then exact names, then substring matches, newest first on ties.
+When a session is compacted (manually or automatically), the fresh session starts with **zero token bloat** — no summary blob, no carried-over baggage. The only thing injected is a short continuation note telling the agent where the previous session's files are and asking it to plan: what was being worked on, what is done, and what remains.
 
-Resume works the same way as compact, in reverse: the current session is saved, a new session is created, and the agent is instructed to read the chosen old session from disk and continue — again entering plan mode and rebuilding its working model of the task from the file rather than from a model-generated summary. Because every session is a self-contained folder, you can resume *any* session from *any* point in time — including sessions from days ago, or a parallel session you were running in a different worktree.
+From there, the agent is a free agent. If it needs a detail from earlier, it does not have to ask you and hope you remember. It uses the tools it already has — `grep`, `read`, `bash` — on the old session folder. It can:
 
-This is not "continue where we left off" in the in-memory sense. It is "open a different file."
+- `grep` the old `conversation.json` for an exact error message, a variable name, or a decision it made.
+- Read the last ~20 messages of the previous conversation to get up to speed on the most recent work.
+- Inspect `traffic/` to see a raw response it was uncertain about.
+- Skim `events.jsonl` to reconstruct the sequence of tool calls.
+
+The context window stays lean because the agent only pulls in the specific historical detail it needs for the step it is on, and nothing more. The full history is always one file-read away, but it does not have to be *in* the window.
 
 ---
 
-## The agent freely explores its own history
+## `/compact` — swap into a fresh session
 
-Because sessions are just files, the agent can do anything it can do on a filesystem. During a long task it might:
+`/compact` seals the current session to disk and starts a new one. It is the manual version of what happens automatically when the context limit is reached.
 
-- `grep -R "TODO" .scorpiox/sessions/2026_09_18_quiet_euler/` to find work it flagged earlier and never finished.
-- `jq '.messages[-20:]' .scorpiox/sessions/<old>/conversation.json` to re-read the last 20 turns of a previous run.
-- `cat .scorpiox/sessions/<old>/events.jsonl | grep task_result` to see the structured outcome of an earlier task.
-- `ls .scorpiox/sessions/` to see how many attempts it has made at a hard problem across sessions.
+```
+/compact
+```
 
-The agent is the one who decides when history matters. There is no hidden compaction layer making that decision for it, and no information is ever out of reach because it fell out of the window.
+What happens:
+
+1. The current conversation is saved in full to `.scorpiox/sessions/<old-session>/conversation.json`.
+2. A `session_compact` event is recorded and the old session is closed.
+3. A new, empty session is created.
+4. The `required_skills.txt` from the old session is carried into the new one.
+5. A continuation instruction is sent to the agent: it is told where the old session lives, asked to read `conversation.json` (focusing on the last ~20 messages), to enter plan mode, write out what is done and what remains, and then continue.
+
+You will see a confirmation like `compact: 2026_09_26_quiet_lantern -> 2026_09_26_brave_compass` in the chat. The old session is untouched on disk; the new one is where you are now.
+
+### Automatic compaction
+
+Compaction is also automatic. By default, SCORPIOX CODE watches the effective context size (the larger of the cached-read tokens and the input tokens) and, when it reaches the threshold, it offers to compact into a fresh session. The defaults at this commit:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `CONTEXT_AUTO_COMPACT` | `1` | Auto-compact is on. |
+| `CONTEXT_CLEAR_THRESHOLD` | `190000` | Compact when effective context reaches ~190K tokens. |
+| `CONTEXT_WARN_THRESHOLD` | `80` | Warn at 80% of the threshold. |
+| `CONTEXT_COMPACT_PROMPT` | `1` | Ask you before compacting. |
+| `CONTEXT_COMPACT_TIMEOUT` | `120` | Seconds to wait for a decision before defaulting. |
+
+When the automatic trigger fires, you are offered a choice: **continue compaction**, **reject it** (and keep going in the current session), or **resize the context window** to a larger threshold and continue. The keys are plain config keys you set through the normal configuration cascade — see [Configuration and Profiles in SCORPIOX CODE](scorpiox-env.md).
+
+---
+
+## `/resume` — pick up any session from disk
+
+Because every session is a folder on disk, you can come back to *any* of them later, not just the most recent.
+
+```
+/resume <session-name>
+```
+
+- **With a name**, SCORPIOX CODE finds the matching session and resumes it: it saves the current work, swaps to a fresh session, carries forward `required_skills.txt`, and sends the same continuation instruction as compact — point the agent at the old folder, ask it to plan, then continue.
+- **Without an argument**, a **picker** pops up listing your previous sessions so you can choose one to resume.
+
+```
+/resume
+```
+
+This is what makes long-horizon work resumable across days. Walk away in the middle of a migration; come back hours or a day later and `/resume` the session you were in. The full transcript is still on disk, so the agent re-reads exactly what happened and picks up from there.
+
+> **Compact and resume are two ends of the same mechanism.** `/compact` is "this session is full, start clean but keep everything on disk." `/resume` is "bring a session back from disk into the active view." Both rely on the same fact: the session folder *is* the record.
+
+---
+
+## A typical long-horizon flow
+
+1. **Start.** A session is created, named, and its folder laid down under `.scorpiox/sessions/`.
+2. **Work.** The agent runs for hours, reading files, running tools. Every turn is written to `conversation.json` as it happens.
+3. **Approaching the limit.** At ~80% of the threshold, a warning appears.
+4. **Hit the limit.** Auto-compact offers to continue. You accept (or run `/compact` yourself).
+5. **Fresh start.** A new empty session begins. The agent reads the last ~20 messages of the sealed session, plans, and continues.
+6. **Needs history?** At any point the agent `grep`s or reads the old session files for exact details, without bloating the current window.
+7. **Later.** Walk away. Come back and `/resume` the session (or pick from the picker). Full fidelity, every time.
 
 ---
 
 ## Gotchas
 
-- **Compaction is a session swap, not an in-place edit.** The old session folder is left in place; a new one is created. If you expected the context to "shrink" in the same session, that is not what happens — the session *changes*.
-- **The fresh session starts with a plan, not a summary.** After `/compact`, the agent is instructed to enter plan mode and write out what was being worked on, what is complete, and what remains. That plan is its working model of the task, built from reading the old `conversation.json`, not from a model-generated summary.
-- **The picker only shows sessions under the current directory's `.scorpiox/`.** If you are in a git worktree, sessions are mirrored to the main checkout's `.scorpiox/`, so the picker sees both the worktree's and the main repo's sessions.
-- **`/resume` is not `/rewind`.** `/rewind` goes back to an earlier checkpoint *within the current session*. `/resume` opens a *different* session folder entirely.
-- **The threshold is a soft limit, not a hard one.** The provider can still reject a request below the threshold if the model's output is unusually long. The threshold is a heuristic for "when to proactively compact," not a guarantee.
-- **Sessions are your audit log.** `events.jsonl` is machine-readable. Pipe it into `jq` to get a timeline of every task result, tool call, and session transition.
-- **Sessions are plain, unencrypted files on your filesystem.** If you commit them to a public repository, you are publishing the full transcript, including any secrets the agent saw. SCORPIOX CODE adds `.scorpiox/sessions/` to `.gitignore` automatically; keep it that way.
+- **The context window is the working set, not the archive.** A fresh session starts clean, but the agent can always read the sealed session on disk. If a detail seems "lost," it is almost certainly in an old session's `conversation.json`.
+- **Compaction preserves everything; it does not delete.** The old session stays on disk until it is cleaned up. Sessions are local and git-ignored by default — do not assume they are backed up elsewhere if persistence across machines matters.
+- **`/resume` without an argument opens the picker, not an error.** If you want a specific session, pass its name (e.g. `/resume 2026_09_26_quiet_lantern`).
+- **`required_skills.txt` carries forward on both compact and resume.** Skills the session depended on are copied into the new session automatically so the agent does not lose them.
+- **The continuation instruction tells the agent to plan first.** After a compact or resume the agent is asked to enter plan mode, write what is done and what remains, and then continue — so a resumed session re-grounds itself before acting.
+- **The automatic threshold is large by default (~190K tokens).** If you are on a smaller context window, lower `CONTEXT_CLEAR_THRESHOLD` so compaction happens before the model runs out, rather than after.
 
 ---
 
-*Docs for SCORPIOX CODE @ 6c70ad6*
+Docs for SCORPIOX CODE @ `b59223a`.

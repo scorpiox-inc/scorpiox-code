@@ -5,9 +5,9 @@ SCORPIOX CODE can run **autonomously**. A *scheduled callback* is a timer the ag
 You manage callbacks in two places:
 
 - **The agent**, through the built-in `SetCallback` tool (it schedules, lists, and cancels timers on its own).
-- **You**, through the `/callbacks` slash command and its popup window (view, pause, resume, or clear the active timers).
+- **You**, through the `/callbacks` slash command and its popup window (view, pause, resume, or hide the active timers).
 
-Source of truth: `sx_tools.c`, `sx_agent.c`, `sx.c`, and `sxui_callbacks.c` at commit `6c70ad6`.
+Docs for SCORPIOX CODE @ `b59223a`.
 
 ---
 
@@ -32,11 +32,11 @@ Think of it as a self-triggering reminder. When a timer fires, SCORPIOX CODE inj
 
 ## The `SetCallback` tool
 
-This is the tool the agent itself uses. It is **enabled by default** (`TOOL_SETCALLBACK=1`). All three actions share one parameter, `action`.
+This is the tool the agent itself uses. It is **enabled by default**. All three actions share one parameter, `action`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `action` | string | yes | `set`, `list`, or `cancel`. If omitted, `set` is assumed. |
+| `action` | string | yes | `set`, `list`, or `cancel`. |
 | `message` | string | for `set` | The text injected back into the conversation when the timer fires. |
 | `delay_seconds` | integer | for `set` | Seconds to wait before firing. Must be 1–3600. |
 | `repeat_count` | integer | no | Fires before auto-cancel. Default **20**; use **-1** for infinite. |
@@ -135,7 +135,7 @@ Each line shows the slot index, a truncated message preview, **time until the ne
  Callbacks (2 active) PAUSED
 ```
 
-> **Pausing ≠ cancelling.** `pause`/`resume` freeze the firing clock; `cancel` (via the tool) actually removes a timer. You can pause a batch, look around, and resume with the full schedule intact.
+> **Pausing is not cancelling.** `pause`/`resume` freeze the firing clock; `cancel` (via the tool) actually removes a timer. You can pause a batch, look around, and resume with the full schedule intact.
 
 The status bar also keeps a small live indicator showing how many callbacks are active and when the next one is due, so you can glance at it without opening the popup.
 
@@ -156,14 +156,14 @@ This is how SCORPIOX CODE polls a job, retries a flaky step, or babysits a long-
 
 ## Gotchas
 
-- **8 is a hard limit.** `SX_CALLBACK_MAX` slots, indexes 0–7. A ninth `set` fails with "all callback slots full (max 8)". For very high-frequency work, use fewer, longer-lived timers rather than many overlapping ones.
+- **8 is a hard limit.** A ninth `set` fails with `Error: all callback slots full (max 8)`. For very high-frequency work, use fewer, longer-lived timers rather than many overlapping ones.
 
 - **Delay is capped at 3600 s (1 hour).** For longer waits, fire a short timer and have the agent re-schedule the next hop — this also lets it inspect state between hops.
 
-- **`repeat_count` is "fires remaining," not "seconds."** Default is 20. A value of `-1` means forever; `0`/`1` effectively means one shot. When the count reaches 0 the slot deactivates itself.
+- **`repeat_count` is "fires remaining," not "seconds."** Default is 20. A value of `-1` means forever; when the count reaches 0 the slot deactivates itself.
 
 - **Timers only fire while idle.** A timer set during an active run is held (and re-based) until the agent finishes, so it never fires in the middle of another turn.
 
-- **`pause` survives nothing but the process.** Paused, fired, and active state all live for the lifetime of the running session — restarting SCORPIOX CODE clears the timer table.
+- **State lives only for the session.** Paused, fired, and active state all live for the lifetime of the running session — restarting SCORPIOX CODE clears the timer table.
 
 - **The message is what wakes the agent.** Make the `message` self-contained (what to do, what to check, how to stop), because the agent acts on it exactly as if a human had typed it.
