@@ -1,6 +1,10 @@
 # Using the OpenAI Provider
 
-SCORPIOX CODE can talk to any server that exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Set `PROVIDER=openai` and point `OPENAI_BASE_URL` at your server — local or remote. This page covers every configuration key, explains the translation layer, and gives verified launch examples for the three major self-hosted inference engines: **llama.cpp**, **vLLM**, and **SGLang**.
+SCORPIOX CODE can talk to **any** server that exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Set `PROVIDER=openai`, point `OPENAI_BASE_URL` at your server — local or remote — and you are running. The provider translates the request wire format for you, so a single configuration drives llama.cpp, vLLM, SGLang, Ollama, LM Studio, a real OpenAI API key, Azure, or any other compatible endpoint.
+
+This page is the full how-to: the keys that make it work, a **verified launch command** for each of the three modern self-hosted engines (llama.cpp, vLLM, SGLang), how to pick and switch a model, how to tune thinking, reasoning effort, and timeouts, and the one URL gotcha that trips almost everyone up.
+
+Docs for SCORPIOX CODE @ `2b0bffd`.
 
 ---
 
@@ -8,46 +12,73 @@ SCORPIOX CODE can talk to any server that exposes an OpenAI-compatible `/v1/chat
 
 | Scenario | Example |
 |----------|---------|
-| **Local inference** | llama.cpp, vLLM, or SGLang running on your workstation or LAN |
-| **Remote OpenAI-compatible API** | OpenAI, Azure OpenAI, Together, Groq, xAI (API key), or any `/v1/chat/completions` proxy |
+| **You run your own model server** | llama.cpp, vLLM, or SGLang on your workstation or a GPU node |
+| **You want OpenAI API access with a key** | `api.openai.com` or any OpenAI-compatible cloud endpoint |
+| **You want a custom / private endpoint** | Azure OpenAI, Ollama, LM Studio, or an internal gateway |
 | **Air-gapped / on-prem** | Models served behind a firewall with no internet access |
 
-If you are connecting to Anthropic, GitHub Copilot, Google, Grok, or another first-party provider, use the dedicated `PROVIDER` value for that service instead (for example `anthropic`, `copilot`, `google_gemini`, `grok`). The OpenAI provider is the right fit when you have an OpenAI **API key** or a **self-hosted OpenAI-compatible server**.
+If you are instead **signing in with a subscription** rather than a key or a local server, that is a different provider: the [Codex provider](codex-provider.md) (OpenAI Codex plan) or the [Copilot provider](copilot-provider.md) (GitHub Copilot) draw on your account allowance. The OpenAI provider is for **endpoints you address directly** — a key, or your own server.
 
-> **API keys only.** The Grok subscription (OAuth login) and Codex paths are separate providers. To call xAI with an *API key* (`XAI_API_KEY`), use this provider with `OPENAI_BASE_URL=https://api.x.ai` — that is the billing path that accepts a key, distinct from the Grok subscription provider.
+> **No login flow.** Unlike the Codex and Copilot providers, there is no OAuth device-code sign-in here. You either supply a key, or you point at a local server that needs none. Configuration is a handful of keys, not a login.
 
 ---
 
-## Configuration keys
+## The headline: a few keys
 
-All keys can be set in `scorpiox-env.txt` at any cascade tier, in a named profile, or as OS environment variables. Environment variables override the file values. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for the full cascade and precedence rules.
+Everything is a `KEY=VALUE` pair in the [configuration cascade](scorpiox-env.md). For a local server you only ever need:
+
+```
+PROVIDER=openai
+OPENAI_BASE_URL=http://localhost:8080
+MODEL=your-model-name
+```
+
+That is the whole thing for a local server. `OPENAI_API_KEY` is **optional** — local engines do not check it, so leave it empty (it is only sent as a `Bearer` header when non-empty). For a real OpenAI-compatible cloud endpoint, add your key.
+
+### Configuration keys
+
+All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile, or as OS environment variables. See [Configuration and Profiles](scorpiox-env.md) for the full cascade and precedence rules.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `PROVIDER` | choice | — | Set to `openai` to activate this provider. |
-| `OPENAI_BASE_URL` | text | *(empty)* | Base URL of the OpenAI-compatible server. SCORPIOX CODE appends `/v1/chat/completions` automatically — set only the host, **do not** include the path. There is no built-in default at this commit, so you must set this for every deployment. |
+| `PROVIDER` | choice | *(unset)* | Set to `openai` to activate this provider. |
+| `OPENAI_BASE_URL` | text | *(empty)* | The server origin, e.g. `http://localhost:8080`. **Required in practice.** See [The one gotcha](#the-one-gotcha-openai_base_url-is-an-origin-not-a-path) below. `OPENAI_API_BASE` is accepted as a fallback if this is empty. |
 | `OPENAI_API_BASE` | text | *(empty)* | Legacy alias for `OPENAI_BASE_URL`. Used only when `OPENAI_BASE_URL` is empty. |
-| `OPENAI_API_KEY` | text | *(empty)* | Bearer token sent in the `Authorization` header. Leave empty for local servers that do not require authentication. |
-| `OPENAI_MODEL` | text | `default` | Model name passed to the server in the `model` field. If you leave it unset, the literal `default` is sent. The server decides which model it actually runs, so match it to a model your server serves. |
-| `OPENAI_TIMEOUT` | text | `1800` | HTTP request timeout in seconds (30 minutes). Increase for very large models or slow hardware. |
-| `OPENAI_CHAT_TEMPLATE_KWARGS` | text | *(empty)* | JSON object of extra Jinja template keyword arguments forwarded to the server (for example `{"enable_thinking":"true"}`). Used by llama.cpp and SGLang to control chat-template behavior. |
-| `OPENAI_REASONING_EFFORT` | choice | *(empty)* | Reasoning effort level: `low`, `medium`, `high`, or `max`. When set, it is added to the request as `reasoning_effort`. Empty means it is not sent. Useful for reasoning-capable models (for example OpenAI o-series). |
+| `OPENAI_API_KEY` | text | *(empty)* | Bearer token. Optional for local servers; required for a real API. |
+| `MODEL` | text | `sonnet` | Which model to run — the name sent to the server. This is the generic model slot and **wins over `OPENAI_MODEL`** when both are set. Set it to a name the server advertises (see [Choosing and switching a model](#choosing-and-switching-a-model)). |
+| `OPENAI_MODEL` | text | `default` | Provider-specific model name. Used only when the generic `MODEL` slot is not set. In practice, set `MODEL`. |
+| `OPENAI_TIMEOUT` | text | `1800` | HTTP request timeout in seconds (30 minutes). Raise it for very large models or slow prefill. |
+| `OPENAI_STREAM` | bool | `0` | `1` streams internally (SSE) and reassembles the body so time-to-first-token can be measured. `0` (default) uses a single non-streamed response. |
+| `OPENAI_CHAT_TEMPLATE_KWARGS` | JSON | *(empty)* | A JSON object forwarded verbatim to the request's `chat_template_kwargs`. This is how you control engine-side template behavior (thinking on/off, etc.). |
+| `OPENAI_REASONING_EFFORT` | choice | *(empty)* | `low`, `medium`, `high`, or `max`. Injected into the request as `reasoning_effort` for engines that read it. Empty means it is not sent. |
+| `REASONING_EFFORT` | choice | *(empty)* | Generic alias with the same value set. |
 
-> **You own the URL.** The shipped configuration ships `OPENAI_BASE_URL` **empty** at this commit. There is no built-in endpoint to fall back to, so a blank value produces a `OPENAI_BASE_URL not configured` error the first time a request is attempted. Point it at your own server explicitly — `http://localhost:8080` for llama.cpp, `http://localhost:8000` for vLLM, `http://localhost:30000` for SGLang.
+> **You must point `OPENAI_BASE_URL` at your server.** There is no built-in server address, so if the URL is empty or unreachable you will get an `OPENAI_BASE_URL not configured` / connection error. The launch examples below show the exact value for each engine.
 
-> **Set the host only.** Because the `/v1/chat/completions` suffix is appended for you, `OPENAI_BASE_URL` should be the scheme and host (optionally with a port) and nothing else. `http://localhost:8080` is correct; `http://localhost:8080/v1/chat/completions` is not.
+---
+
+## The one gotcha: `OPENAI_BASE_URL` is an origin, not a path
+
+SCORPIOX CODE appends `/v1/chat/completions` to whatever you put in `OPENAI_BASE_URL`. So set **only the origin**:
+
+```
+OPENAI_BASE_URL=http://localhost:8080          # correct
+OPENAI_BASE_URL=http://localhost:8080/v1       # wrong — becomes .../v1/v1/chat/completions
+```
+
+- **Do not include** `/v1`, `/v1/chat`, or `/v1/chat/completions` in the URL.
+- A `404` after a long prompt usually means the base URL is wrong (extra path, or the wrong port). Confirm the endpoint answers with `scorpiox-openai-models <url>` before touching anything else.
 
 ---
 
 ## Setting the keys
 
-### In scorpiox-env.txt (any cascade tier)
+### In `scorpiox-env.txt` (any cascade tier)
 
 ```
 PROVIDER=openai
 OPENAI_BASE_URL=http://localhost:8080
-OPENAI_API_KEY=
-OPENAI_MODEL=qwen3-30b-a3b
+MODEL=your-model-name
 ```
 
 ### In a named profile
@@ -57,216 +88,194 @@ Create a file such as `~/.claude/scorpiox-env/local-llama.txt`:
 ```
 PROVIDER=openai
 OPENAI_BASE_URL=http://localhost:8080
-OPENAI_API_KEY=
-OPENAI_MODEL=qwen3-30b-a3b
+MODEL=your-model-name
 OPENAI_TIMEOUT=3600
-OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking":"true"}
+OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking": true}
 ```
 
 Activate it persistently or for a single session:
 
 ```bash
-# Persistent (survives restarts)
+# Persistent (survives restarts — written to the user tier)
 /profile local-llama
 
 # Session-only (no file change)
 /use local-llama
 ```
 
-Both commands trigger a live provider reload, so the new endpoint and model take effect immediately.
-
 ---
 
-## How the translation works
+## Running llama.cpp
 
-The OpenAI provider is a thin translation layer. Every turn, it converts the internal Anthropic-format request into an OpenAI Chat Completions request, sends it to your server, and converts the response back.
-
-1. **Outbound:** the internal request is translated into an OpenAI Chat Completions request and POSTed to `{OPENAI_BASE_URL}/v1/chat/completions`.
-2. **Inbound:** the OpenAI response is translated back and returned.
-
-This happens transparently — you interact with SCORPIOX CODE the same way regardless of provider.
-
-### Field translations
-
-| Internal (Anthropic) | OpenAI (wire) |
-|----------------------|---------------|
-| `model` | `model` |
-| `messages` (role + content) | `messages` (role + content) |
-| `system` | `system` (merged into the messages where the server expects it) |
-| `tools` | `tools` |
-| `max_tokens` | `max_tokens` |
-| — | `chat_template_kwargs` (injected from `OPENAI_CHAT_TEMPLATE_KWARGS`) |
-| — | `reasoning_effort` (injected from `OPENAI_REASONING_EFFORT`) |
-
-### Thinking and reasoning content
-
-The layer maps reasoning content between formats. When the server returns a `reasoning_content` or `reasoning` field (as llama.cpp and vLLM do), it is surfaced as a thinking block in the UI. Both field names are handled automatically.
-
-**Reasoning token accounting.** The status bar shows a reasoning-token counter for local models using a two-step strategy:
-
-1. **Authoritative:** if the backend returns `usage.completion_tokens_details.reasoning_tokens` (OpenAI o-series style), that value is used directly.
-2. **Estimated fallback:** when the backend returns thinking text but no `reasoning_tokens` (common with llama.cpp and vLLM), the count is estimated from the thinking text's word count. This keeps the display useful even when the backend does not track reasoning tokens natively.
-
-### Retry behavior
-
-Failed requests are retried up to **5 times** with exponential backoff (starting at 1 second, capped at 30 seconds). Truncated or malformed responses (for example a tool-call `arguments` string cut off at `finish_reason=length`) are retried a few times with a short backoff before an error is surfaced.
-
----
-
-## Verified launch examples
-
-> Model used in all three examples: **Qwen/Qwen3-30B-A3B**. Swap in any model your server serves.
-
-### llama.cpp
-
-llama.cpp's built-in server listens on **`127.0.0.1:8080`** by default and exposes `/v1/chat/completions`.
-
-**Start the server:**
+llama.cpp's `llama-server` is the lightest way to serve a local model. Its OpenAI-compatible endpoint is at `/v1/chat/completions`, and it listens on **`127.0.0.1:8080`** by default.
 
 ```bash
-./llama-server \
-    --model /path/to/model.gguf \
-    --host 0.0.0.0 \
-    --port 8080 \
-    --ctx-size 16384 \
-    --n-gpu-layers 99 \
-    --jinja \
-    --reasoning-format deepseek \
-    --flash-attn
+llama-server \
+  --model your-model.gguf \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --ctx-size 32768
 ```
 
-- `--jinja` enables the Jinja chat-template engine. It is on by default for the server, but pass it explicitly on older builds — it is required for `chat_template_kwargs` passthrough and for models that ship Jinja templates (Qwen3, DeepSeek, and most modern models).
-- `--reasoning-format deepseek` puts the model's thinking into `message.reasoning_content` so SCORPIOX CODE can surface it cleanly. Other values: `none` (leave thoughts in content) and `deepseek-legacy` (keep the tags in content while also populating `reasoning_content`). Default is `auto`.
-- `--n-gpu-layers 99` offloads all layers to the GPU. Lower it for partial offload.
-- `--flash-attn` enables Flash Attention (recommended when your GPU supports it).
+| Flag | What it does |
+|------|--------------|
+| `--model` | The GGUF model file to load. |
+| `--host` / `--port` | Bind address. Defaults `127.0.0.1:8080`. |
+| `--ctx-size` | Maximum context window (tokens). |
 
-**Configure SCORPIOX CODE:**
+llama.cpp's Jinja chat-template engine is **enabled by default**, so it accepts `chat_template_kwargs` from the request — including `enable_thinking` for reasoning models. Point the provider at it:
 
 ```
 PROVIDER=openai
 OPENAI_BASE_URL=http://localhost:8080
-OPENAI_API_KEY=
-OPENAI_MODEL=qwen3-30b-a3b
-OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking":"true"}
+MODEL=your-model
 ```
 
-> **Tip:** For Qwen3 thinking models, set `OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking":"true"}` so the Jinja template activates the model's built-in thinking mode. Set it to `{"enable_thinking":"false"}` to turn thinking off.
+To set a standing thinking behavior for every request, add the template kwargs:
+
+```
+PROVIDER=openai
+OPENAI_BASE_URL=http://localhost:8080
+MODEL=your-model
+OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking": true}
+```
+
+Flip the value to `false` to turn thinking off for a model that defaults it on.
+
+> **Check your slot, not just the port.** llama.cpp can serve multiple concurrent slots. Use the `/slots` slash command in SCORPIOX CODE (it reads `OPENAI_BASE_URL` if you don't pass a URL) to see live slot occupancy, or run `scorpiox-llamacpp-slots http://localhost:8080`.
 
 ---
 
-### vLLM
+## Running vLLM
 
-vLLM listens on **`8000`** by default and exposes an OpenAI-compatible API.
-
-**Start the server:**
+vLLM is the go-to for high-throughput serving, especially across a fleet of GPUs. Its `vllm serve` command exposes the OpenAI-compatible API on **port `8000`** by default.
 
 ```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --reasoning-parser qwen3 \
-    --served-model-name qwen3-30b-a3b
+vllm serve your-org/your-model \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --enable-auto-tool-choice \
+  --tool-call-parser llama3_json \
+  --default-chat-template-kwargs '{"enable_thinking": false}'
 ```
 
-- `--reasoning-parser` tells vLLM how to extract thinking from the model's output. Common values use underscores: `qwen3`, `deepseek_r1`, `deepseek_v3`.
-- `--served-model-name` sets the model name returned by `/v1/models` and expected in requests. If omitted, vLLM uses the HuggingFace model ID.
+| Flag | What it does |
+|------|--------------|
+| `serve <model>` | Positional model path (Hugging Face repo id or local path). This is the name that appears in `/v1/models` — set it as `MODEL`. |
+| `--host` / `--port` | Bind address. Port defaults to `8000`. |
+| `--enable-auto-tool-choice` | **Required for tool calling.** Without it the server does not parse tool calls, so the tool loop breaks. |
+| `--tool-call-parser` | Which parser to use. **Required with `--enable-auto-tool-choice`.** Pick the one matching your model — common values include `llama3_json`, `llama4_json`, `hermes`, `mistral`, `deepseek_v3`, and `qwen3_coder`. |
+| `--default-chat-template-kwargs` | A JSON object merged into every request's template kwargs (request-level values win). This is how you set a standing `enable_thinking` for a Qwen3 / DeepSeek-style reasoning model. |
 
-**Configure SCORPIOX CODE:**
+vLLM merges `--default-chat-template-kwargs` with any request-level `chat_template_kwargs`, so you can set a server-wide default and still override per-session with `OPENAI_CHAT_TEMPLATE_KWARGS`.
 
 ```
 PROVIDER=openai
 OPENAI_BASE_URL=http://localhost:8000
-OPENAI_API_KEY=
-OPENAI_MODEL=qwen3-30b-a3b
+MODEL=your-org/your-model
 ```
 
-> **Note:** vLLM returns reasoning content in the `reasoning_content` field (or `reasoning` on some versions). The translation layer handles both field names automatically.
+> **Tool calling is opt-in in vLLM.** This is the number-one reason a vLLM backend "doesn't call tools" under SCORPIOX CODE. You must pass **both** `--enable-auto-tool-choice` **and** a matching `--tool-call-parser`. If you set one without the other, vLLM errors at startup.
+
+> **Server metrics.** vLLM exposes a Prometheus `/metrics` endpoint. Use the `/metrics` slash command in SCORPIOX CODE (reads `OPENAI_BASE_URL` by default) to pull live throughput and KV-cache numbers.
 
 ---
 
-### SGLang
+## Running SGLang
 
-SGLang listens on **`30000`** by default and exposes an OpenAI-compatible API.
-
-**Start the server:**
+SGLang is a strong choice for high-throughput and agentic workloads. Its `sglang serve` command is OpenAI-compatible and listens on **`127.0.0.1:30000`** by default.
 
 ```bash
-python -m sglang.launch_server \
-    --model Qwen/Qwen3-30B-A3B \
-    --host 0.0.0.0 \
-    --port 30000 \
-    --reasoning-parser qwen3
+sglang serve \
+  --model-path your-org/your-model \
+  --host 127.0.0.1 \
+  --port 30000
 ```
 
-- `--reasoning-parser` works the same way as in vLLM, but SGLang names use dashes. Common values: `qwen3`, `qwen3-thinking`, `deepseek-r1`, `deepseek-v3`.
-- SGLang accepts `chat_template_kwargs` in the request body, so `OPENAI_CHAT_TEMPLATE_KWARGS` works here too.
-- Alternatively, pin a server-wide default at launch with `--default-chat-template-kwargs '{"enable_thinking": true}'` to apply thinking to every request. A per-request `chat_template_kwargs` (from `OPENAI_CHAT_TEMPLATE_KWARGS`) takes precedence over the server default.
+| Flag | What it does |
+|------|--------------|
+| `--model-path` | Model path (Hugging Face repo id or local path). This is the name in `/v1/models` — set it as `MODEL`. |
+| `--host` / `--port` | Bind address. Defaults `127.0.0.1:30000`. |
 
-**Configure SCORPIOX CODE:**
+SGLang's tool calling is **on by default** (its `tool_call_parser` defaults to `auto`), so you do not need the equivalent of vLLM's `--enable-auto-tool-choice`. It reads `chat_template_kwargs` from the request, including `enable_thinking`, so the SCORPIOX CODE knob reaches it directly:
 
 ```
 PROVIDER=openai
 OPENAI_BASE_URL=http://localhost:30000
-OPENAI_API_KEY=
-OPENAI_MODEL=Qwen/Qwen3-30B-A3B
+MODEL=your-org/your-model
+OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking": false}
 ```
+
+> **Note the port.** SGLang's default port is `30000`, not `8080` or `8000`. A `404` or `connection refused` after a long prompt usually means the base URL is pointing at the wrong port. Confirm with `scorpiox-openai-models http://localhost:30000`.
 
 ---
 
-### Remote OpenAI-compatible endpoint
+## Pointing at a real OpenAI-compatible API
 
-For remote APIs (OpenAI, Azure OpenAI, Together, Groq, xAI, or any compatible proxy):
+For the actual OpenAI API (or Azure / any OpenAI-compatible cloud endpoint), the shape is identical — you just add the key and use the provider's base URL:
 
 ```
 PROVIDER=openai
 OPENAI_BASE_URL=https://api.openai.com
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o
+MODEL=gpt-4o
 ```
 
-For Azure OpenAI, point `OPENAI_BASE_URL` at your deployment's base URL (for example `https://my-resource.openai.azure.com/openai/deployments/my-deployment`) and set the API key accordingly. For xAI with an API key, use `OPENAI_BASE_URL=https://api.x.ai` and your `XAI_API_KEY`.
+Again, **no `/v1`** in the base URL — the path is appended for you. The key is only sent as a `Bearer` header when it is non-empty, so keep it out of your local profiles and only put it where a real endpoint expects it.
 
 ---
 
-## Discovering and monitoring models
+## Choosing and switching a model
 
-A set of companion utilities ships alongside the main binary and the OpenAI translation proxy.
-
-### `/models` — model picker
-
-Inside a session, the `/models` command opens a live popup that polls your server's `/v1/models` endpoint and lists the available models. With no argument it defaults to `OPENAI_BASE_URL`; pass a URL to inspect a specific server.
-
-```
-/models                          # use OPENAI_BASE_URL
-/models http://localhost:8000    # inspect a specific server
-```
-
-### `/model` — show or switch model
-
-`/model` shows the active model and lets you switch it for the session.
-
-### Companion CLI tools
-
-These are useful from a shell to verify a server is up and to watch throughput.
-
-| Tool | What it does | Example |
-|------|--------------|---------|
-| `scorpiox-openai-models` | Queries `{base_url}/v1/models` and prints a compact list. Strips a trailing `/v1` or `/models` for you, so both a plain base URL and a pasted `/v1/models` URL work. | `scorpiox-openai-models http://localhost:8080` |
-| `scorpiox-llamacpp-slots` | Polls a llama.cpp server's `/slots` endpoint and reports token generation and prompt processing speed. | `scorpiox-llamacpp-slots http://localhost:8080` |
-| `scorpiox-vllm-metrics` | Polls a vLLM server's Prometheus `/metrics` endpoint and reports generation and prompt speed from the counters. | `scorpiox-vllm-metrics http://localhost:8000` |
+- **List what the server offers:** `scorpiox-openai-models <url>` prints the `/v1/models` list. The values in `models[].id` are your candidates for `MODEL`.
+- **In-session switch:** `/model <name>` switches the active model without editing any file. This is the fastest way to A/B two models.
+- **Persist a choice:** write `MODEL` into your user or project `scorpiox-env.txt`, or into a named profile.
+- **Reasoning effort:** `/reasoning_effort <low|medium|high|max|off>` sets it in-session; `OPENAI_REASONING_EFFORT` is the config key. It is injected into the request and only has an effect on engines that read it.
 
 ---
 
-## Gotchas
+## How a request flows
 
-- **You must set `OPENAI_BASE_URL`.** At this commit the default is empty and there is no built-in endpoint. A blank value fails on the first request with a `OPENAI_BASE_URL not configured` error. Point it at your own server — `http://localhost:8080` (llama.cpp), `http://localhost:8000` (vLLM), or `http://localhost:30000` (SGLang).
+1. You start a session with `PROVIDER=openai` and your base URL set.
+2. For each turn, SCORPIOX CODE builds the request and sends it to `OPENAI_BASE_URL` + `/v1/chat/completions`.
+3. The server replies in OpenAI Chat Completions format. SCORPIOX CODE translates it back and drives the tool loop.
+4. When the model returns a tool call, SCORPIOX CODE executes the tool and sends the result back in the next request — repeating until the model finishes.
 
-- **Do not include the path in the URL.** SCORPIOX CODE appends `/v1/chat/completions` automatically. Set only the host — `http://localhost:8080`, not `http://localhost:8080/v1/chat/completions`. (The `/models` helper and `scorpiox-openai-models` are more forgiving and strip a trailing `/v1`, but the provider itself does not.)
+Because the translation is endpoint-agnostic, the exact same session works against llama.cpp, vLLM, SGLang, or a cloud API — the only thing that changes is `OPENAI_BASE_URL` (and the key, when one is needed).
 
-- **Match `OPENAI_MODEL` to what your server serves.** The value is passed through verbatim; if you leave it unset the literal string `default` is sent, and a server that has no model named `default` will reject it. Use the same name the server returns from `/v1/models`.
+---
 
-- **`OPENAI_API_KEY` is optional for local servers.** Leave it empty when llama.cpp, vLLM, or SGLang runs without authentication. Set it for OpenAI, Azure, Together, Groq, or any remote key-protected endpoint.
+## Tuning for slow or large models
 
-- **llama.cpp thinking needs `--jinja` and the right `--reasoning-format`.** Without `--jinja`, `OPENAI_CHAT_TEMPLATE_KWARGS` like `{"enable_thinking":"true"}` has no effect. Use `--reasoning-format deepseek` so the thinking lands in `reasoning_content` where SCORPIOX CODE reads it.
+- **`OPENAI_TIMEOUT`** — raise it (for example `3600`) when prefill on a large MoE model exceeds the 30-minute default.
+- **`OPENAI_STREAM=1`** — streams internally and reassembles the response so time-to-first-token can be reported. Useful on servers that do not return timing information. Response handling is otherwise unchanged.
+- **`OPENAI_CHAT_TEMPLATE_KWARGS`** — a per-engine JSON object for template behavior (the most common one is `{"enable_thinking": true}` or `{"enable_thinking": false}`).
+- **`OPENAI_REASONING_EFFORT`** — for reasoning-capable models, sets how much reasoning the engine spends. Empty means "not sent," so the engine uses its own default.
 
-- **Reasoning parser names differ between vLLM and SGLang.** vLLM uses underscores (`qwen3`, `deepseek_r1`); SGLang uses dashes (`qwen3`, `deepseek-r1`). Set the parser that matches your engine and model, or the thinking will not be split out of the content.
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `OPENAI_BASE_URL not configured` | The key is empty | Set `OPENAI_BASE_URL` to your server origin. |
+| `connection refused` | Wrong port, or server not running | Confirm the port (llama.cpp `8080`, vLLM `8000`, SGLang `30000`) and that the server is up. |
+| `404` | Extra `/v1` in the URL, or wrong path | Set the origin only — see [The one gotcha](#the-one-gotcha-openai_base_url-is-an-origin-not-a-path). |
+| Server does not call tools (vLLM) | Tool calling not enabled | Add `--enable-auto-tool-choice` **and** `--tool-call-parser`. |
+| Model name rejected | `MODEL` does not match the server | List names with `scorpiox-openai-models <url>` and use one of `models[].id`. |
+| No thinking / reasoning | Engine not told to think | Set `OPENAI_CHAT_TEMPLATE_KWARGS` (and optionally `OPENAI_REASONING_EFFORT`). |
+
+---
+
+## Reference
+
+- **Provider:** `PROVIDER=openai`
+- **Base URL:** `OPENAI_BASE_URL` (origin only — `/v1/chat/completions` is appended)
+- **Model keys:** `MODEL` (wins) / `OPENAI_MODEL` (fallback, defaults to `default`)
+- **Auth:** `OPENAI_API_KEY` (optional for local servers)
+- **Timeout:** `OPENAI_TIMEOUT` (seconds, default `1800`)
+- **Streaming:** `OPENAI_STREAM` (`0`/`1`, default `0`)
+- **Template behavior:** `OPENAI_CHAT_TEMPLATE_KWARGS` (JSON)
+- **Reasoning:** `OPENAI_REASONING_EFFORT` (`low`/`medium`/`high`/`max`, or leave empty)
+- **Helper commands:** `/models`, `/slots` (llama.cpp), `/metrics` (vLLM), `/model <name>`, `/reasoning_effort <level>`
+- **Standalone tools:** `scorpiox-openai-models <url>`, `scorpiox-llamacpp-slots <url>`, `scorpiox-vllm-metrics`

@@ -1,141 +1,147 @@
 # API Traffic Logging and Complete Remote Call Transparency
 
-Every remote LLM provider call SCORPIOX CODE makes is saved to disk, verbatim, the moment it happens. The exact prompt it sent, the exact endpoint it hit, the exact headers it used, and the exact response that came back — all written to a plain folder on your machine that you can open with any editor.
+When SCORPIOX CODE talks to a remote model, most tools treat that conversation as a black box. You see a prompt go in, you see an answer come back, and the only way to know what actually happened in between is to trust the tool. SCORPIOX CODE does not ask for that trust. Every single outgoing request and every single incoming response is written to disk, verbatim, on your machine, the moment it happens — in plain files you can open in any text editor.
 
-There is no "trust us" layer. If a call was made, there is a file for it. If a file is on disk, you can read it. This page explains where those files live, what is captured in them, and how to use them to audit what left your machine at any given turn.
+This page explains what is captured, exactly where it lives, what each file contains, and how to use it to verify, to the byte, what left your machine at any given turn.
 
-Docs for SCORPIOX CODE @ `b59223a`.
+Docs for SCORPIOX CODE @ `2b0bffd`.
 
----
-
-## Why this exists
-
-Most agent tools are a black box around the network. They talk to an API, you get an answer, and the wire traffic in between is gone. When something looks off — a surprising token bill, a model behaving oddly, a context that seems to have changed — you have no record to check against. You are asked to take the tool's word for what it sent.
-
-SCORPIOX CODE removes that gap entirely. **Every outgoing request and every incoming response to any remote LLM endpoint is written to disk before the conversation continues.** No sampling, no "recent N only", no opt-in flag. The capture is part of the normal request path, so what you see on disk is exactly what was sent and received — nothing more, nothing less.
-
-The result is a **100% transparent, fully auditable** record of the session's remote activity:
-
-- **The exact data sent** — the full request body, including the assembled prompt, every tool definition, every message in context, and any tool calls.
-- **The exact endpoint and headers** — the URL the request was posted to and the HTTP headers it carried.
-- **The exact response** — the full response body that came back, plus the HTTP status and any usage accounting the provider reported.
-- **A per-call timeline** — a single log that lists, in order, every request and response with a timestamp and a byte count, so you can follow the session call by call.
-
-You can answer, for any turn, the questions "what exactly did SCORPIOX CODE send to the provider?" and "what did the provider return?". The answer is on your disk, in plain files, in the order they happened.
+> **The whole idea in one line:** nothing about your network traffic is a secret, a summary, or an after-the-fact report. The exact bytes you sent and the exact bytes you received are saved as raw files on your disk, per session, so the audit trail is immutable, local, and yours to inspect.
 
 ---
 
-## Where the captures live
+## Why every call is recorded
 
-Each SCORPIOX CODE session has its own folder under `.scorpiox/sessions/`, and traffic captures are stored inside the session, in a `traffic/` subdirectory:
+A remote call to a model is the one place where information actually leaves your machine. Everything else in SCORPIOX CODE is local. Because the model endpoint is the only outbound path, that single path is where transparency matters most.
+
+Recording it completely changes the security model:
+
+- **No black-box network activity.** If a request was sent, you can see it. There is no hidden metadata, no silently stripped context, no background channel you cannot see. What you can inspect is all that was sent.
+- **An immutable, filesystem-native trail.** The record is a set of plain files. There is no database to reverse-engineer, no proprietary format to decode, and no service that holds the only copy. It is on your disk, in a folder you own outright.
+- **Verifiability over trust.** You do not have to believe the tool is only sending what it claims to be sending. You open the file and read what actually went out.
+
+This is the same philosophy behind the zero-data-collection architecture: the guarantee is not a promise, it is something you can check with your own eyes.
+
+---
+
+## Where the traffic lives
+
+Each session has its own traffic directory. For a session with identifier `<session>`, every recorded exchange is written under:
 
 ```
-.scorpiox/sessions/<session>/
-  ├── conversation.json      # Full conversation history
-  ├── session.log            # Session-level log output
-  ├── meta.json              # Session metadata (model, provider, profile, ...)
-  └── traffic/               # All remote API traffic for this session
+.scorpiox/sessions/<session>/traffic/
 ```
 
-Because the traffic folder lives *inside* the session directory, the network record for a session sits right next to the conversation it produced. Open the session, and both the dialogue and the wire traffic that drove it are in the same place.
+The directory is created up front when the session starts, so it exists even before the first request. Everything inside it is per-session: one session's traffic never mixes with another's. If you run multiple sessions, each gets its own isolated folder under `.scorpiox/sessions/`.
 
-The session folder name is a human-readable, date-anchored identifier (for example `2026_09_26_happy_euler`), so you can tell at a glance which day a capture belongs to. The full set of files that make up a session is documented in [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md).
+A typical traffic directory looks like this:
 
----
+```
+.scorpiox/sessions/<session>/traffic/
+  traffic.log           # human-readable chronological summary of every exchange
+  raw/                  # the verbatim bytes
+    001-req-body.json   # exact request body sent on call #001
+    001-req-headers.txt # exact request line + headers for call #001
+    001-resp-200.json   # exact response body returned on call #001
+    002-req-body.json
+    002-req-headers.txt
+    002-resp-200.json
+    ...
+```
 
-## What is captured
-
-Every API call is recorded as a pair of files — one for the request, one for the response — numbered in the order the calls were made. A call is a **request** (what you sent) followed by a **response** (what came back). For the *n*th call in the session you will find:
-
-| File | What it holds |
-|------|---------------|
-| `NNN-req-headers.txt` | The request line (method and URL) plus the HTTP headers sent with the call. |
-| `NNN-req-body.json` | The complete request body, verbatim: model, full message/context array, tools, and parameters. |
-| `NNN-res-headers.txt` | The response status line and response headers. |
-| `NNN-res-body.json` / `NNN-res-body.txt` | The complete response body, verbatim — JSON for providers that return JSON, raw stream text for providers that stream. |
-| `NNN-usage.json` | The token-usage object the provider reported for the call, pulled out of the response on its own. |
-
-`NNN` is a zero-padded sequence number, so the files sort in the order the calls happened: `001-req-body.json`, `002-req-body.json`, and so on. The same numbering appears in the per-call log, which makes it trivial to jump from a line in the log to the matching request and response files.
-
-### The per-call log
-
-Alongside the per-call files, each session keeps a single append-only log that records every request and response in order, with a wall-clock timestamp and a byte size. Each line shows which provider handled the call, the direction (outgoing request or incoming response), the endpoint or status, and the payload size.
-
-Read the log top to bottom and you have the session's complete network timeline — every round trip, in order, with the size of each payload. When you find a line you want to inspect, the sequence number in the line points straight at the matching request and response files in `raw/`.
-
-### Token usage, captured per call
-
-When a provider reports token usage in its response, SCORPIOX CODE extracts that usage object and saves it as its own small file for the call, alongside the request and response. So for any call you can read the model's account of how many tokens it consumed without parsing the full response body by hand. This is the same data the provider uses for billing, captured locally so you can reconcile a session against your own records.
-
-### What is redacted
-
-The captures are faithful, but they are not credential dumps. Authentication material in the headers is masked before it is written to disk — bearer tokens and API keys do not end up in your traffic files in plaintext. Everything else — the URL, the other headers, the full request and response bodies — is captured verbatim.
+The numbering is a simple per-session sequence: call `001`, then `002`, and so on. The response file carries the HTTP status code in its name (`resp-200.json`, `resp-429.json`, ...), so you can tell at a glance which calls succeeded and which hit an error, a retry, or a rate limit.
 
 ---
 
-## Inspecting a session's traffic
+## What is captured in each file
 
-Because the capture is filesystem-native, you inspect it with the tools you already use. There is no viewer to install and no server to query.
+The record is verbatim, not a summary. Here is what you can read out of each file.
 
-A typical workflow:
+### `traffic.log` — the timeline
 
-1. **Find the session folder.**
-   ```bash
-   ls -t .scorpiox/sessions/
-   ```
-   The newest first, each named by date and a short identifier.
+`traffic.log` is an append-only, chronological log of the session's network activity. One line per event, in the order it happened, each stamped with a local time. It is the fastest way to get the shape of a session: how many calls were made, roughly how big each one was, and where things went wrong.
 
-2. **Read the timeline.**
-   ```bash
-   cat .scorpiox/sessions/<session>/traffic/*.log
-   ```
-   This is the call-by-call record: provider, direction, endpoint or status, and payload size, in order. It is the fastest way to see how many calls a session made and roughly how big each was.
+### `raw/*-req-body.json` — exactly what you sent
 
-3. **Open a specific call.** Pick a sequence number from the log, then read its files.
-   ```bash
-   cat .scorpiox/sessions/<session>/traffic/raw/001-req-body.json
-   cat .scorpiox/sessions/<session>/traffic/raw/001-res-body.json
-   ```
-   The request file shows exactly what left the machine; the response file shows exactly what came back.
+This is the request body, byte for byte, in the raw JSON it was transmitted as. Read it and you see the exact prompt, the full conversation context, every tool definition, and any tool calls that were part of the request. If something you did not expect was included in a prompt, it will be sitting in this file. Nothing is paraphrased, truncated, or summarized here.
 
-4. **Check what was sent.** The request body is the assembled prompt — every message, every tool, every parameter — so it answers "what did SCORPIOX CODE actually send the provider?" with no reconstruction and no guesswork.
+### `raw/*-req-headers.txt` — the endpoint and the headers
 
-5. **Check the cost.** Open the usage file for the call to see the token counts the provider reported.
-   ```bash
-   cat .scorpiox/sessions/<session>/traffic/*usage*.json
-   ```
+Each request file pairs with a headers file containing the exact request line and the HTTP headers that were sent, including the full endpoint URL and the request method. This is where you verify *where* a call went, not just *what* it contained.
 
-Nothing about this requires network access, a running session, or a privileged mode. The files are plain text and JSON, so `jq`, `grep`, and your editor all work on them directly.
+One deliberate exception: the API key is not written to disk. The `x-api-key` header is masked in the recorded headers, so your credentials never land in the traffic log. Every other header is recorded as sent.
+
+### `raw/*-resp-<code>.json` — exactly what came back
+
+The response body, verbatim, named after the HTTP status code that produced it. This is the raw payload the model returned: the completed message, any tool calls it requested, and the usage figures for that call. Because the status code is in the filename, a `429` (rate limited) or a `5xx` (provider error) is immediately visible and separate from a clean `200`.
+
+### Timestamps and token usage
+
+Because every file is written at the moment the call happens and `traffic.log` is time-stamped line by line, the trail carries a real timeline. And because the response bodies are stored whole, the per-call token usage the provider returned — input, output, and any cache-read or cache-creation counts — is right there in the raw response for any call where the provider included it. You never have to rely on an in-memory number that disappears when the session ends.
 
 ---
 
-## Zero black-box activity
+## Reading a session's traffic yourself
 
-The property worth keeping in mind is the negative one: **there is no network activity that is not captured.** Every remote LLM call goes through the same request path that writes these files, so the on-disk record is complete by construction, not by sampling.
+You do not need a special tool. Everything is plain text on disk.
 
-That completeness, combined with the fact that the record lives in a folder you own, gives you an **immutable, filesystem-native audit trail**. You can:
+To list the calls in a session and their sizes:
 
-- **Verify what left the machine.** Open any request file and read, word for word, the prompt, tools, and context that were sent.
-- **Reconstruct the conversation on the wire.** The ordered request bodies, read in sequence, are the exact progression of context the provider saw across the session.
-- **Reconcile usage.** The per-call usage files let you line up a session's token consumption against a provider's billing statement.
-- **Replay or diff.** Because the bodies are saved verbatim, you can diff two sessions, two models, or two prompts against each other to see precisely what changed.
-- **Own the record completely.** The files are yours, on your disk. Delete the session folder and the record is gone; copy it and it travels with you.
+```bash
+cat .scorpiox/sessions/<session>/traffic/traffic.log
+```
 
-This is the traffic-side complement to the session's local-first design. The conversation lives in the session folder, and now the network traffic that produced it lives right beside it. Together they make a session fully reproducible and fully inspectable, with no part of the picture held on someone else's server.
+To read exactly what was sent on the first call:
 
-For the broader guarantee — no telemetry, no phone-home, local ownership of every session artifact — see [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md).
+```bash
+cat .scorpiox/sessions/<session>/traffic/raw/001-req-body.json
+```
+
+To see the endpoint and headers for that same call:
+
+```bash
+cat .scorpiox/sessions/<session>/traffic/raw/001-req-headers.txt
+```
+
+And to read what the model returned:
+
+```bash
+cat .scorpiox/sessions/<session>/traffic/raw/001-resp-200.json
+```
+
+That is the entire audit. Three files per call, all readable, all local, all yours. If you want to script against it — diff two sessions, grep a prompt across history, feed it to a log viewer — it is plain text on the filesystem, so standard tools work unchanged.
 
 ---
 
-## Gotchas
+## What this guarantees, and what it does not
 
-- **The traffic folder is part of the session, so it is as local as the session itself.** It lives under `.scorpiox/sessions/<session>/`, and that directory is added to `.gitignore` where applicable, so captures are not swept into a commit and pushed to a remote. They stay on your machine unless you move them.
-- **Auth material is masked, the rest is verbatim.** Bearer tokens and API keys are redacted in the captured headers, so you will not find a live credential in a traffic file. But the URLs, the other headers, and the full request and response bodies are captured exactly as they were sent and received.
-- **Response file extension follows the payload.** Providers that return JSON give a `.json` response body; providers that stream give a raw `.txt` body of the stream. Both are the complete response, just different shapes.
-- **Captures are append-only and per-session.** A session's traffic is written as the calls happen and is not rewritten or truncated while the session runs. The sequence numbers make the ordering explicit and unambiguous.
-- **This is the API traffic, not the agent's internal logging.** The session also keeps its own log and event streams (the conversation, agent log, events). Traffic captures specifically record the remote HTTP calls — what crossed the network to the provider and back.
-- **Credential safety is on you, too.** Because request bodies contain your full prompt and context verbatim, treat the traffic folder the same way you treat the session folder: it is sensitive data. Do not commit or share it carelessly.
+Be precise about the guarantee, because it is strong but bounded:
+
+- **It is complete for what left the machine.** The outbound request body is the exact data that was transmitted. If a file shows a prompt, that prompt went out. There is no hidden payload you cannot see.
+- **It is verbatim, not interpretive.** These are the bytes, not a description of the bytes. You are never reading a summary of what you sent — you are reading what you sent.
+- **It is local and under your control.** The trail is on your disk. You can read it, copy it, move it, or delete it. Nothing about it requires a server, an account, or a vendor to access.
+- **It does not reach back.** Recording traffic is a local write. Saving these files sends nothing anywhere. The files exist on your machine and nowhere else unless you put them there.
+
+In short: the record proves what went out, it proves it byte for byte, and it lives only where you can look.
 
 ---
 
-*Docs for SCORPIOX CODE @ `b59223a`.*
+## How this differs from typical tools
+
+| Dimension | SCORPIOX CODE | Typical AI coding tools |
+|-----------|---------------|-------------------------|
+| **Outbound requests** | Saved verbatim to disk, per session. | Not exposed; you infer what was sent from the UI. |
+| **Endpoint & headers** | Recorded, including the exact URL. | Hidden inside the tool. |
+| **Response payloads** | Saved raw, status-coded, readable. | Shown in the UI only, not persisted as raw data. |
+| **Audit trail** | Plain files on your filesystem, immutable and local. | Vendor-side logs or none at all. |
+| **Credentials in the log** | API key masked; never written to disk. | N/A — there is no log to inspect. |
+| **How you verify it** | Open the file and read the bytes. | Trust the tool. |
+
+The difference is not a feature flag. It is whether the network path is observable at all. In SCORPIOX CODE it is, completely, and the evidence sits in a folder you can open right now.
+
+---
+
+## Related
+
+- [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md)

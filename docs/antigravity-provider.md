@@ -1,10 +1,17 @@
 # Using Google Antigravity CLI Subscription in SCORPIOX CODE
 
-Have a Google Antigravity CLI subscription (the free "Antigravity Starter Quota" that ships with a Google account) but no Google Cloud project or API key? You can use it directly in SCORPIOX CODE. Instead of metering Google Cloud API tokens, the **Antigravity providers** sign you in with your normal Google account and run requests against the same Cloud Code Assist backend your subscription already draws on.
+You have a **Google Antigravity CLI** subscription (an Antigravity Starter Quota account, or any consumer Google account that the official Antigravity CLI can sign into) but you don't want to run your own Google Cloud project or pay per API token. You can use it directly in SCORPIOX CODE. Instead of metering Google Cloud API tokens, the **Antigravity providers** sign you in with the same OAuth PKCE session login the Antigravity CLI uses and route requests against the Antigravity endpoint your subscription already pays for.
 
-This page walks through the **OAuth 2.0 PKCE login**, how the token is stored and kept fresh, how to switch between the two Antigravity models (Gemini and Claude-via-Google), and how Antigravity subscription access differs from the standard Google Cloud API-key provider.
+There are two providers behind this one subscription, and you pick whichever model family you want:
 
-Source of truth: `scorpiox-antigravity-login.c`, `scorpiox-google-fetchtoken.c`, `sx_provider_google_gemini.c`, `sx_provider_google_claude.c`, and `sx_provider_gemini_vertex.c` at commit `b59223a`.
+| `PROVIDER` value | Model family | Example default |
+|------------------|--------------|-----------------|
+| `google_gemini` | Gemini models via Antigravity | `gemini-3.7-flash-tiered` |
+| `google_claude`  | Claude models via Antigravity | `claude-sonnet-4-6` |
+
+This page walks through the **OAuth PKCE session login**, how the token is stored and kept fresh, how to switch between accounts and models with profiles (`/profile` and `/use`), how to drive a login without a TTY (**machine mode**), and how the Antigravity subscription differs from standard Google Cloud API-key usage.
+
+Docs for SCORPIOX CODE @ `2b0bffd`.
 
 ---
 
@@ -12,243 +19,280 @@ Source of truth: `scorpiox-antigravity-login.c`, `scorpiox-google-fetchtoken.c`,
 
 | Scenario | Example |
 |----------|---------|
-| **You have a Google Antigravity CLI subscription** | The free Starter Quota that comes with a Google account |
-| **You don't have (or don't want) a Google Cloud API key** | No GCP project, no billing account, no pay-per-token |
-| **You want Claude models through Google's backend** | Claude Sonnet via the same Antigravity sign-in |
+| **You have a Google Antigravity CLI subscription** | An Antigravity Starter Quota or any consumer Google account the Antigravity CLI signs into |
+| **You don't run (or want to run) your own GCP project** | Consumer (Gmail) accounts bill against a shared Google-side project — no project ID of your own, no licence, no invoice |
+| **You don't have a Google Cloud API key** | No pay-per-token billing — requests draw on your Antigravity usage allowance |
+| **Headless / over SSH** | The login flow works over SSH: approve in a browser on any device, paste the code back |
+| **Driven by SCORPIO BOT** | The login can be started and finished as separate commands (`--start` / `--finish`) with no open TTY — see [Machine mode](#machine-mode-no-tty) |
 
-If you are instead calling Google's Vertex AI / AI platform with a Google Cloud API key (`VERTEX_API_KEY`), use `PROVIDER=gemini_vertex` — see [Antigravity vs. the Vertex API-key provider](#antigravity-vs-the-vertex-api-key-provider).
+If you are instead calling the Google Cloud Gemini API with a `VERTEX_API_KEY` and your own GCP project, use `PROVIDER=gemini_vertex`. The two are different billing models for overlapping models — see [Antigravity subscription vs. Google Cloud API-key usage](#antigravity-subscription-vs-google-cloud-api-key-usage) below.
 
-> **Subscription, not API.** The Antigravity providers authenticate with OAuth and use your account's usage tier. They do **not** accept a `VERTEX_API_KEY` and do **not** bill per token against your GCP project. The two are different billing models for overlapping models.
-
----
-
-## The two Antigravity providers
-
-A single Antigravity sign-in unlocks **two** `PROVIDER` values, because the same OAuth token feeds both backends. SCORPIOX CODE writes one profile for each when you log in:
-
-| `PROVIDER` | What it runs | Login-created profile | Default model |
-|------------|--------------|-----------------------|---------------|
-| `google_gemini` | Gemini models via Cloud Code Assist | `/profile antigravity` | `gemini-3.7-flash-tiered` |
-| `google_claude` | Claude models via Google's backend | `/profile antigravity-claude` | `claude-sonnet-4-6` |
-
-Both profiles share `GOOGLE_TOKEN_SOURCE=local` and the same stored Google account — so one login covers both.
+> **Subscription, not API key.** The Antigravity providers authenticate with OAuth and draw on your Antigravity usage allowance. They do **not** accept a `VERTEX_API_KEY` and do **not** require a Google Cloud project of their own.
 
 ---
 
-## Step 1 — Sign in with the OAuth PKCE flow
+## Step 1 — Sign in with the OAuth PKCE session flow
 
-Log in with the dedicated command:
+The default login is the **OAuth authorization-code (PKCE) flow**, the same one the official Antigravity CLI performs. It is deliberately SSH- and headless-friendly: you approve from a browser on whatever device is already signed in, then paste the resulting authorization code back into your terminal. No browser is required on the machine you're running from.
 
 ```bash
 scorpiox-antigravity-login
 ```
 
-This is a **PKCE** (Proof Key for Code Exchange) OAuth 2.0 authorization-code flow. SCORPIOX CODE generates the cryptographic challenge for you and prints a single authorization URL. Do exactly what it asks:
-
-1. **Open the printed URL** in a browser on any device.
-2. **Sign in with your Google account** and approve the requested permissions.
-3. Google redirects to a callback. **Copy the authorization code** from the redirect (or the full redirect URL) and **paste it back into the terminal** when prompted.
-
-Once you paste the code, SCORPIOX CODE exchanges it for an access + refresh token, fetches your account email, discovers your usage tier and companion project, and saves everything automatically. On success you'll see:
+You'll see something like this:
 
 ```
+  SCORPIOX GOOGLE ANTIGRAVITY LOGIN
+
+Please open the following authorization URL in your browser:
+
+  https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=...&code_challenge=...&code_challenge_method=S256&...
+
+Sign in with your Google Account and approve permissions.
+After approval, paste the authorization code (or the full redirect URL) below:
+
+  Authorization Code: >
+```
+
+Do exactly what it says:
+
+1. **Open the printed URL** in a browser — on any device, wherever you're signed into Google.
+2. **Sign in** to your Google account and approve the permissions.
+3. Come back to your terminal and **paste the authorization code** when prompted (the full redirect URL is fine — the state fragment is stripped automatically).
+
+SCORPIOX CODE then exchanges the code for an access + refresh token, fetches your account profile, discovers your usage tier, and saves the credentials. On success you'll see:
+
+```
+==================================================
+  Login Successful!
+==================================================
+
   Account:    you@gmail.com
   Project:    aicode-consumers
-  User Tier:  standard-tier (...)
+  User Tier:  standard-tier (Standard)
 
   Configured Profiles:
-    /profile antigravity          (Gemini 3.7 Flash Tiered)
-    /profile antigravity-claude   (Claude Sonnet 4.6 via Google)
+    - /profile antigravity         (Gemini 3.7 Flash Tiered)
+    - /profile antigravity-claude  (Claude Sonnet 4.6 via Google)
 ```
 
 A few things worth knowing about this flow:
 
-- **Paste the code or the full URL.** The prompt accepts either the bare authorization code or the whole redirect URL — SCORPIOX CODE extracts the `code=` parameter from a URL for you.
-- **Never share the authorization code.** It's a credential and is single-use. Anyone with the code can bind it to your account.
-- **Re-run with `--force` to re-login.** Pass `--force` to re-run the flow and overwrite the stored refresh token for your account. This is also the recovery path when a stored credential goes stale.
+- **The access token is short-lived by design** — but you never manage that (see [Token persistence and automatic refresh](#token-persistence-and-automatic-refresh)).
+- **Never share the authorization code.** It is a credential. Anyone who has the code (and is watching the terminal) can bind it to your account.
+- **No browser on the box? No problem.** Approve from your laptop, phone, or a kiosk and paste the code back.
+- **Consumer accounts have no GCP project.** If you signed in with a plain Gmail account, the "Project" shown is a shared Google-side project ID, not a project you own. That is expected and is what makes inference work on an Antigravity Starter Quota account.
 
-### Account verification gate
+### Overwriting existing credentials
 
-A Google account that hasn't passed Google's own verification check is flagged `VALIDATION_REQUIRED`. SCORPIOX CODE will stop the login and print the exact verification URL to open:
-
-```
-  Account verification required
-  -----------------------------
-  ...
-  Open this URL in a browser signed in as you@gmail.com:
-  https://accounts.google.com/...
-  Then re-run: scorpiox-antigravity-login --force
-```
-
-This is a Google-side check, not a SCORPIOX CODE error. Open the link, complete verification in the browser, then re-run the login with `--force`.
-
----
-
-## Step 2 — Turn on an Antigravity provider
-
-Signing in saves the token **and** writes two ready-to-use profiles. Activate one in-session:
-
-```
-/profile antigravity          # Gemini (PROVIDER=google_gemini)
-/profile antigravity-claude   # Claude via Google (PROVIDER=google_claude)
-```
-
-Or set the keys yourself in any cascade tier, a named profile, or as OS environment variables. The minimal set for a personal subscription is:
-
-```
-PROVIDER=google_gemini
-GOOGLE_TOKEN_SOURCE=local
-```
-
-That's it. `GOOGLE_ACCOUNT`, `GOOGLE_PROJECT_ID`, and the model are already filled in by the login-created profiles.
-
-### Configuration keys
-
-All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile, or as OS environment variables. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for the full cascade and precedence rules.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `PROVIDER` | choice | `claude_code` | Set to `google_gemini` or `google_claude` to activate an Antigravity provider. |
-| `GOOGLE_TOKEN_SOURCE` | choice | `local` | Where to get the OAuth token: `local`, `remote`, or `tcp`. Use **`local`** for an account you logged into with `scorpiox-antigravity-login`. |
-| `GOOGLE_ACCOUNT` | text | *(empty)* | Which Google account to use. If empty, the most recently logged-in account is used. |
-| `GOOGLE_PROJECT_ID` | text | *(empty)* | Companion GCP project. Empty falls back to the shared consumer project — leave it empty for a plain Google account. |
-| `GOOGLE_ACCOUNTS_FILE` | text | *(empty)* | Override the credentials file path. Defaults to `~/.config/google-accounts/antigravity_accounts.json`. |
-| `GOOGLE_REMOTE_URL` | text | *(empty)* | Token endpoint, used only when `GOOGLE_TOKEN_SOURCE=remote`. |
-| `GOOGLE_GEMINI_MODEL` | text | *(empty)* | Gemini model for `PROVIDER=google_gemini`. Empty resolves to the built-in default. Set a full `gemini-*` ID to target a specific model. |
-| `GOOGLE_GEMINI_MAX_RETRIES` | int | `5` | Maximum retry attempts for transient errors (HTTP 429, 500, 502, 503, 529) with exponential backoff. Set to `0` to disable retry entirely. |
-| `GOOGLE_CLAUDE_MODEL` | text | *(empty)* | Claude model for `PROVIDER=google_claude`. Empty resolves to `claude-sonnet-4-6`. Accepts short aliases (`opus`, `sonnet`, `haiku`) or a full `claude-*` ID. |
-| `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` | text | *(empty)* | Used only when `GOOGLE_TOKEN_SOURCE=tcp` — fetch the token over a raw TCP socket. |
-
-> **For a personal subscription you only need two keys:** `PROVIDER=google_gemini` (or `google_claude`) and `GOOGLE_TOKEN_SOURCE=local` — the login-created profiles already set both. The `remote` and `tcp` sources exist for shared or remote token setups and are not needed for a normal Antigravity login.
-
-### Where the credentials live
-
-On login, SCORPIOX CODE writes:
-
-- **`~/.config/google-accounts/antigravity_accounts.json`** — an array of logged-in accounts, each with its `email` and `refresh_token`. This is the file the providers read on every request.
-- **`~/.config/google-accounts/selected_account.txt`** — the account most recently logged in (used when `GOOGLE_ACCOUNT` is empty).
-- **`~/.claude/scorpiox-env/antigravity.txt`** and **`~/.claude/scorpiox-env/antigravity-claude.txt`** — the two ready-to-use profiles.
-
-The file holds a live refresh token that renews your account. Keep the default permissions; don't loosen them.
-
----
-
-## Token persistence and automatic refresh
-
-The OAuth access token is short-lived by design — but you don't manage that. With `GOOGLE_TOKEN_SOURCE=local`, the provider handles it on **every request**:
-
-- **Automatic refresh per request.** Before each call the provider reads the stored `refresh_token` from `antigravity_accounts.json` and performs a `refresh_token` grant against Google's token endpoint, so a fresh access token is always used. You never copy-paste a token by hand.
-- **Re-login is the fallback.** As long as `antigravity_accounts.json` is intact you generally sign in once. If you ever see an "unauthorized" or "token expired" hint and it keeps recurring, re-bind the account:
+If you're already logged in, the command re-uses the stored refresh token. To force a fresh login (for example after an account change, or to re-authorize a different Google account), pass `--force`:
 
 ```bash
 scorpiox-antigravity-login --force
 ```
 
-You can also inspect the resolved token without making a model request, for diagnostics:
+### Multiple Google accounts
 
-```bash
-scorpiox-google-fetchtoken -local     # fetch from the local refresh-token file
-scorpiox-google-fetchtoken -config    # read GOOGLE_TOKEN_SOURCE from scorpiox-env.txt
-scorpiox-google-fetchtoken -remote    # fetch from the HTTP endpoint
-scorpiox-google-fetchtoken -tcp       # fetch over the raw TCP socket
+Antigravity does not use named account files the way some other providers do. Every account you log in with is **added to the same account list** automatically, so you can hold several Google accounts side by side and pick which one a profile talks to with `GOOGLE_ACCOUNT` (an email address). See [Multi-account and profile switching](#multi-account-and-profile-switching).
+
+---
+
+## Step 2 — Turn on a provider
+
+The login command writes **two ready-to-use profiles** for you under `~/.claude/scorpiox-env/`:
+
+- **`antigravity`** → `PROVIDER=google_gemini` (Gemini via Antigravity)
+- **`antigravity-claude`** → `PROVIDER=google_claude` (Claude via Antigravity)
+
+Each profile sets the provider, the token source, the account, the project ID, and a sensible default model. To start a session with one of them:
+
+```text
+/profile antigravity
 ```
 
-The output is a JSON line: `{"ok":true,"email":"...","access_token":"...","project_id":"..."}`. Use it to confirm the token source resolves to the account you expect before a long run.
+or, for a single session without making it your standing default:
+
+```text
+/use antigravity-claude
+```
+
+Both commands trigger a live provider reload, so the new backend and model take effect immediately. If the new profile fails to initialize, SCORPIOX CODE reverts to the previous one. See [Configuration and Profiles](scorpiox-env.md) for the full switching semantics.
+
+### Configuration keys
+
+All of these can live in any cascade tier of `scorpiox-env.txt`, in a named profile, or as OS environment variables. See [Configuration and Profiles](scorpiox-env.md) for the full cascade and precedence rules.
+
+| Key | Applies to | Notes |
+|-----|------------|-------|
+| `PROVIDER` | both | `google_gemini` or `google_claude` |
+| `GOOGLE_TOKEN_SOURCE` | both | `local` (default for these profiles), `remote`, or `tcp` |
+| `GOOGLE_ACCOUNT` | both | The Gmail address to use, when you have more than one |
+| `GOOGLE_PROJECT_ID` | both | Project ID. Usually filled in for you at login; left to Google for consumer accounts |
+| `GOOGLE_GEMINI_MODEL` | `google_gemini` | See [Choosing a model](#choosing-a-model) |
+| `GOOGLE_CLAUDE_MODEL` | `google_claude` | See [Choosing a model](#choosing-a-model) |
+| `GOOGLE_REMOTE_URL` | both | Required only when `GOOGLE_TOKEN_SOURCE=remote` |
+
+### Where the credentials live
+
+The login writes three things:
+
+- **`~/.config/google-accounts/antigravity_accounts.json`** — the list of signed-in Google accounts, each with an email and a **refresh token**.
+- **`~/.config/google-accounts/selected_account.txt`** — the currently selected account (the most recent login).
+- **`~/.claude/scorpiox-env/antigravity.txt`** and **`~/.claude/scorpiox-env/antigravity-claude.txt`** — the two profiles described above.
+
+The accounts file holds a live refresh token. Don't commit it, don't share it, and don't loosen its permissions.
+
+---
+
+## Token persistence and automatic refresh
+
+The access token from the OAuth session is short-lived by design — but you don't manage that. With `GOOGLE_TOKEN_SOURCE=local`, SCORPIOX CODE handles it on **every request**:
+
+- **Proactive refresh.** When the stored access token is close to expiring, the provider refreshes it against the OAuth token endpoint using the stored refresh token and reloads the new value, so in-flight work never hits an expired credential.
+- **Reactive recovery.** If a request still comes back unauthorized, the provider refreshes once and retries. A second failure after a refresh is reported as a permanent auth error.
+- **Remote / TCP sources always fetch fresh.** In `remote` or `tcp` modes the token is re-fetched on every request (the remote server is the source of truth and may have revoked an old token), so there is no local expiry to worry about.
+
+The refresh token (stored in `~/.config/google-accounts/antigravity_accounts.json`) is what lets the access token be renewed without signing in again. As long as that file is intact, you generally sign in once and it keeps working. If you ever see an "unauthorized" or "token expired" hint, the fix is almost always a re-login:
+
+```bash
+scorpiox-antigravity-login --force
+```
+
+You can also inspect the resolved token without making a model request, for diagnostics. This helper is shared by both Antigravity providers:
+
+```bash
+scorpiox-google-fetchtoken -config    # resolve from the active profile / scorpiox-env
+```
+
+The output is a single JSON line: `{"ok":true,"email":"...","access_token":"ya29...","project_id":"..."}`. Use it to confirm the token source resolves to the account you expect before a long run.
 
 ---
 
 ## Multi-account and profile switching
 
-Many people have more than one Google account (personal + work, for example). The Antigravity providers support that in two layers: **multiple stored accounts** and **named config profiles**.
+### Hold more than one Google account
 
-### Store more than one login
-
-Each `scorpiox-antigravity-login` run appends to the account array in `antigravity_accounts.json`. To pin a specific account to a profile, set `GOOGLE_ACCOUNT` in that profile to the email you want:
+Each `scorpiox-antigravity-login` adds (or refreshes) one entry in the account list. To target a specific account from a profile, set its email in `GOOGLE_ACCOUNT`:
 
 ```
-GOOGLE_ACCOUNT=work@gmail.com
+PROVIDER=google_gemini
+GOOGLE_TOKEN_SOURCE=local
+GOOGLE_ACCOUNT=you@gmail.com
+GOOGLE_PROJECT_ID=aicode-consumers
+GOOGLE_GEMINI_MODEL=gemini-3.7-flash-tiered
+MODEL=gemini-3.7-flash-tiered
 ```
 
-If `GOOGLE_ACCOUNT` is empty, the most recently logged-in account (the one in `selected_account.txt`) is used.
+If `GOOGLE_ACCOUNT` is left empty, the provider uses the selected account (`selected_account.txt`).
 
-### Switch models and accounts in-session
+### Switch accounts and models in-session
 
-Switching is just switching profiles — no re-login, no restart:
-
-```
-/profile antigravity        # Gemini (persistent — writes ACTIVE_PROFILE, survives restarts)
-/profile antigravity-claude # Claude via Google
-/use antigravity            # session-only — gone when the session ends
-/profile                    # list available profiles and which is active
-/profile off                # deactivate
+```text
+/profile antigravity         # Gemini via Antigravity, standing default
+/profile antigravity-claude  # Claude via Antigravity, standing default
+/use    antigravity           # hop to it for this session only; nothing is written
+/profile                      # list profiles and show which is active
+/profile off                  # deactivate the profile
 ```
 
-`/profile` and `/use` both trigger a live provider reload, so the new backend and model take effect immediately. If the new profile fails to initialize, SCORPIOX CODE reverts to the previous one. See [Configuration Cascade and Environment Profiles](scorpiox-env.md) for the full switching semantics.
+`/profile` persists the choice in your user file; `/use` is session-only. Both trigger a live provider reload, so the backend and model change takes effect immediately. See [Configuration and Profiles](scorpiox-env.md).
 
 ### Inspect what's actually configured
 
-Use `scorpiox-config` to see resolved values and where each comes from (which cascade tier won):
+```bash
+scorpiox-google-quota            # readable per-model quota table
+scorpiox-google-quota --json     # raw quota buckets
+scorpiox-google-quota --account you@gmail.com
+scorpiox-google-models           # list the models the endpoint advertises
+```
+
+The quota tool works for both `google_gemini` and `google_claude` because they share the same Google account / token infrastructure. A `remainingFraction` of `1` is full; `0` is exhausted for that window.
+
+---
+
+## Machine mode (no TTY)
+
+Sometimes you can't hold a terminal open between "here's the URL" and "paste the code" — a background agent, a CI step, or SCORPIO BOT's provider flow. For that, the login tool ships an **additive machine mode**: the same PKCE flow split into separate, non-interactive commands that print a single line of JSON to stdout. Tokens are **never** printed — only status. Running the tool with no machine flag is the original interactive behaviour, unchanged.
+
+| Flag | What it does |
+|------|--------------|
+| `--status` | Report the login state for this node. |
+| `--start` | Begin the login: returns the `auth_url`, and keeps the PKCE state for 15 minutes. |
+| `--finish <code\|->` | Exchange the pasted code for tokens (`-` reads the code from stdin). |
+| `--cancel` | Drop a pending login. |
+
+A typical machine-mode login:
 
 ```bash
-scorpiox-config            # open the interactive config editor
-scorpiox-config --verbose  # print key values (PROVIDER, GOOGLE_TOKEN_SOURCE, MODEL, ACTIVE_PROFILE, ...) with their source tier
+# 1. Start — prints the URL to open
+scorpiox-antigravity-login --start
+#   {"ok":true,"provider":"antigravity","flow":"paste_code","auth_url":"https://accounts.google.com/o/oauth2/auth?...", "expires_in":900, "hint":"Sign in with Google and approve..."}
+
+# 2. Open that URL, sign in, copy the authorization code.
+
+# 3. Finish — exchange the code
+scorpiox-antigravity-login --finish "$CODE"
+#   {"ok":true,"provider":"antigravity","logged_in":true,"path":"/home/you/.config/google-accounts/antigravity_accounts.json","profile":"antigravity"}
 ```
+
+Things worth knowing:
+
+- **State survives between commands.** Between `--start` and `--finish` the PKCE verifier and `state` live in `~/.claude/.login-pending/` (mode `0600`), so the two calls can be separate processes on the same node.
+- **Fifteen-minute window.** If `--finish` comes more than 15 minutes after `--start`, the pending state is dropped and the command fails with `expired` — run `--start` again.
+- **One JSON line per call.** Everything is on stdout as a single line; the caller reads the last line that starts with `{`. A failure looks like `{"ok":false,"provider":"antigravity","error":"...","detail":"..."}`.
+- **Paste-code flow, not poll.** Antigravity is a paste-code flow, so there is no `--poll`; it is `--start` then `--finish`.
+- **No named accounts.** `--name` is not supported; each Google account is added to the shared account list automatically.
 
 ---
 
 ## Choosing a model
 
-Both Antigravity providers accept a short alias or a full model ID, resolved to a concrete backend model:
+`MODEL` can be set in a profile, or switched at runtime with the `/model` command. The per-provider model keys control the same selection.
 
-`PROVIDER=google_gemini` (`GOOGLE_GEMINI_MODEL`):
+For `google_gemini` (`GOOGLE_GEMINI_MODEL`), the values available at this commit are:
 
-The Gemini backend maps short aliases to a single live Cloud Code Assist model, so the aliases are interchangeable rather than a fast/mid/slow ladder:
+`gemini-3.8-flash-high`, `gemini-3.8-flash-tiered`, `gemini-3.7-flash-tiered`, `gemini-3.6-flash-high`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-high`, `gemini-3-flash`, `gemini-2.5-pro`, `gemini-2.5-flash`
 
-| Value | Resolves to |
-|-------|-------------|
-| `opus` / `pro` / `sonnet` / `flash` / `haiku` | `gemini-3.8-flash-high` |
-| any `gemini-*` ID | passed through as-is |
-| *(empty)* | `gemini-3.8-flash-high` |
+For `google_claude` (`GOOGLE_CLAUDE_MODEL`), the values available at this commit are:
 
-Pass a full `gemini-*` ID (for example `gemini-3.8-flash-high`) whenever you want a specific model.
+`claude-sonnet-4-6`, `claude-opus-4-6-thinking`
 
-`PROVIDER=google_claude` (`GOOGLE_CLAUDE_MODEL`):
+> Note: the login-created `antigravity` profile ships with `gemini-3.7-flash-tiered` and the `antigravity-claude` profile with `claude-sonnet-4-6` out of the box. Change either key in the profile to switch the default.
 
-| Value | Resolves to |
-|-------|-------------|
-| `opus` / `pro` | `claude-opus-4-6-thinking` |
-| `sonnet` / `flash` | `claude-sonnet-4-6` |
-| `haiku` | `claude-sonnet-4-6` |
-| any `claude-*` ID | passed through as-is |
-| *(empty)* | `claude-sonnet-4-6` |
-
-Set the model in your profile, or switch it at runtime with the `/model` command. The login-created profiles ship `gemini-3.7-flash-tiered` (Gemini) and `claude-sonnet-4-6` (Claude) respectively — full model IDs that pass straight through to the backend.
+You can list every model the endpoint advertises with `scorpiox-google-models`.
 
 ---
 
-## Antigravity vs. the Vertex API-key provider
+## Antigravity subscription vs. Google Cloud API-key usage
 
-It's easy to confuse the two because they both reach Google models. Here's the difference:
+It's easy to confuse the two because they both run Google models. Here's the difference:
 
-| | **Antigravity** (this page) | **Vertex AI** (`PROVIDER=gemini_vertex`) |
+| | **Antigravity providers** (this page) | **Google Cloud API-key usage** (`PROVIDER=gemini_vertex`) |
 |---|---|---|
-| **Authentication** | OAuth PKCE login (`scorpiox-antigravity-login`) | Google Cloud API key (`VERTEX_API_KEY`) |
-| **Billing** | Your Antigravity subscription tier | Pay-per-use against your GCP billing account |
-| **Endpoint** | Cloud Code Assist (subscription backend) | `aiplatform.googleapis.com` |
-| **Models** | Gemini *and* Claude-via-Google | Gemini via Vertex AI |
-| **Best for** | People who already have a Google/Antigravity subscription | GCP workloads already on a Google Cloud billing project |
+| `PROVIDER` value | `google_gemini` / `google_claude` | `gemini_vertex` |
+| **Authentication** | OAuth PKCE session login (`scorpiox-antigravity-login`) | `VERTEX_API_KEY` bearer token |
+| **Billing** | Your Antigravity usage allowance (Starter Quota / consumer account) | Pay-per-token Google Cloud API usage |
+| **Google Cloud project** | None of your own — consumer accounts use a shared Google-side project | You need your own GCP project + API key |
+| **Token source** | `GOOGLE_TOKEN_SOURCE` (`local` / `remote` / `tcp`) | `VERTEX_API_KEY` |
+| **Best for** | People who already use the Antigravity CLI | Pay-as-you-go API access on your own project |
 
-Rule of thumb: **you have an Antigravity/Google subscription → `google_gemini` / `google_claude`. You have a Google Cloud API key and a GCP project → `gemini_vertex`.**
+Rule of thumb: **you use the Antigravity CLI / have an Antigravity allowance → `google_gemini` or `google_claude`. You have your own GCP project and an API key → `gemini_vertex`.**
 
 ---
 
 ## Gotchas
 
-- **`GOOGLE_TOKEN_SOURCE` is `local` by default here, but you still need a login.** The value means "read from `~/.config/google-accounts/antigravity_accounts.json`." If you haven't run `scorpiox-antigravity-login`, that file doesn't exist and you'll get `Failed to fetch Google access token`.
-- **The login command and the provider are separate.** `scorpiox-antigravity-login` writes the credentials and the two profiles. You still need an Antigravity profile active (via `/profile` or `ACTIVE_PROFILE`) for SCORPIOX CODE to use it.
-- **Leave `GOOGLE_PROJECT_ID` empty for a plain Google account.** A consumer (Gmail) account has no project of its own; SCORPIOX CODE falls back to the shared consumer project automatically. Writing a made-up project name is what causes the misleading "no valid license" error on the first prompt.
-- **One login, two providers.** The same stored token feeds both `google_gemini` and `google_claude`. You don't log in twice.
-- **The authorization code is single-use and a credential.** Never share it. If the login times out or the code is rejected, just run `scorpiox-antigravity-login` again.
-- **Verification failures are Google's, not yours.** A `VALIDATION_REQUIRED` gate means Google wants you to open a link and verify the account. Open it, then re-run with `--force`.
-- **Refreshing is automatic, but re-login is the fallback.** If requests keep coming back unauthorized, do a full `scorpiox-antigravity-login --force` to re-bind the refresh token.
-- **Profile switches are live and safe.** `/profile` and `/use` swap the provider in place and revert automatically if the new profile can't initialize.
+- **The login command and the provider are separate.** `scorpiox-antigravity-login` writes the token file and the two profiles. You still need `PROVIDER=google_gemini` or `PROVIDER=google_claude` active (via `/profile`, `/use`, or `ACTIVE_PROFILE`) for SCORPIOX CODE to use it.
+- **The accounts file holds a live refresh token.** `~/.config/google-accounts/antigravity_accounts.json` can renew your account session — don't commit it, don't share it, and don't loosen its permissions.
+- **Consumer accounts have no project of their own.** The "Project" shown after a Gmail login is a shared Google-side project ID. That is correct. Don't replace it with a local workspace label — a non-existent project makes Google reject every request.
+- **`/profile` persists; `/use` does not.** Use `/profile` to make an Antigravity account your standing default and `/use` to hop to it for a single session without writing anything.
+- **Machine mode is additive.** `--status` / `--start` / `--finish` / `--cancel` are only active when you pass one of those flags; an unflagged `scorpiox-antigravity-login` is the interactive flow. `--poll` and `--name` are not supported. Pending machine state expires after 15 minutes.
+
+---
+
+## Related
+
+- [Configuration and Profiles](scorpiox-env.md)
+- [Claude Code provider](claude-code-provider.md)
+- [OpenAI provider](openai-provider.md)
+- [Copilot provider](copilot-provider.md)
