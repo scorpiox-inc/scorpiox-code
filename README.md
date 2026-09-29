@@ -2,23 +2,21 @@
 
 High-performance native coding assistant with 100% local filesystem sessions.
 
-Pure C99 architecture engineered for sub-millisecond CLI startup, complete offline auditability, and zero cloud lock-in.
+Pure C99 systems architecture. 463K lines of hand-engineered C. 111 standalone binaries. Zero dependencies. Zero cloud lock-in.
 
 ---
 
-## Architecture & Systems Engineering Truth
+## Why SCORPIOX CODE
 
-- **Pure C**: 458,000 lines of hand-crafted C99. No interpreted layers. No runtime.
-- **111 Standalone Native Binaries**: Dedicated Unix-philosophy helper binaries executing focused operational tasks.
-- **Zero Dependencies**: No Node.js, no Python, no Electron, no package manager. One binary. Full system.
-- **100% Local Filesystem Sessions**: Transcripts and state stored as raw, transparent JSON directly on disk for complete offline auditability.
-- **Wire-Level Transparency**: Verbatim on-disk HTTP traffic recording for full cryptographic and API auditability.
+- **Pure C99** — No runtime, no interpreter, no JIT. Compiles to a single statically linked binary.
+- **Sub-millisecond startup** — No cold-start tax. The binary is always ready.
+- **100% local** — All sessions, transcripts, and state live on your filesystem. Nothing leaves your machine unless you explicitly send it to an LLM API.
+- **Zero dependencies** — One binary. No `node_modules`, no `pip`, no `npm`. It just works.
+- **Offline-auditable** — Every interaction is logged locally. Full conversation compaction, traffic logging, and session replay without a network round-trip.
 
 ---
 
-## Quick Install
-
-Single-line installation. No package manager required.
+## Installation
 
 ### Windows (PowerShell)
 
@@ -38,45 +36,62 @@ curl -fsSL "https://get.scorpiox.net?platform=linux" | bash
 curl -fsSL "https://get.scorpiox.net?platform=mac" | bash
 ```
 
+One command. One binary. No package manager required.
+
 ---
 
 ## Supported AI Providers
 
-SCORPIOX CODE connects natively to official subscription CLI tools and raw endpoints without token metering or vendor markups:
+SCORPIOX CODE works with any major LLM backend. Each provider guide covers authentication, configuration, and advanced options.
 
-| Provider | Architecture | Guide |
-|---|---|---|
-| **Claude Code CLI** | Native OAuth session login, local background token daemon | [Guide](docs/claude-code-provider.md) |
-| **GitHub Copilot CLI** | Official device-code login, no API key meter limits | [Guide](docs/copilot-provider.md) |
-| **xAI Grok Build & SuperGrok** | Grok Build and SuperGrok subscription auth | [Guide](docs/grok-provider.md) |
-| **Google Antigravity CLI** | Gemini & Claude Sonnet over Google Cloud Code Assist | [Guide](docs/antigravity-provider.md) |
-
----
-
-## Documentation
-
-Technical reference for every subsystem:
-
-### Configuration & Architecture
-
-- [Project Instructions](docs/project-instructions.md): Context injection, instruction hierarchy, and prompt cache stability.
-- [Scheduled Callbacks](docs/callbacks.md): Autonomous agent loops, scheduled callbacks, and background execution.
-
-### Core Operations
-
-- [Keepalive & Cache Warming](docs/keepalive.md): Live popup UI, prompt cache warming, and background pings.
-- [Conversation Compaction](docs/conversation-compaction.md): Filesystem-native sessions, deterministic compaction, and raw session retention.
-- [File Editing & Autonomy](docs/file-editing.md): Deterministic line-based file editing tools without container lock-in.
-- [Hooks System](docs/hooks-system.md): Folder-based lifecycle event hooks with synchronous and asynchronous execution.
-
-### Privacy & Auditing
-
-- [Data Privacy](docs/data-privacy.md): Zero telemetry, zero external tracking, 100% local filesystem sessions.
+| Provider | Documentation |
+|---|---|
+| OpenAI Codex & ChatGPT Subscription | [docs/codex-provider.md](docs/codex-provider.md) |
+| Claude Code CLI Subscription | [docs/claude-code-provider.md](docs/claude-code-provider.md) |
+| GitHub Copilot CLI Subscription | [docs/copilot-provider.md](docs/copilot-provider.md) |
+| xAI Grok Build & SuperGrok Subscription | [docs/grok-provider.md](docs/grok-provider.md) |
+| Google Antigravity CLI Subscription | [docs/antigravity-provider.md](docs/antigravity-provider.md) |
+| OpenAI Provider & Local GPU Backends | [docs/openai-provider.md](docs/openai-provider.md) |
 
 ---
 
-## Ecosystem
+## Configuration
 
-- **Website**: [code.scorpiox.net](https://code.scorpiox.net)
-- **Install**: [get.scorpiox.net](https://get.scorpiox.net)
-- **Repository**: [github.com/scorpiox-inc/scorpiox-code](https://github.com/scorpiox-inc/scorpiox-code)
+SCORPIOX CODE uses a deterministic 5-tier configuration cascade. Environment variables, project-level settings, user settings, system defaults, and compiled-in fallbacks are resolved in a fixed priority order.
+
+Full reference: [docs/project-instructions.md](docs/project-instructions.md)
+
+---
+
+## Advanced Features
+
+| Feature | Documentation |
+|---|---|
+| Scheduled Callbacks & Autonomous Agent Loops | [docs/callbacks.md](docs/callbacks.md) |
+| Skills System | [docs/skills-system.md](docs/skills-system.md) |
+| Conversation Compaction | [docs/conversation-compaction.md](docs/conversation-compaction.md) |
+| File Editing | [docs/file-editing.md](docs/file-editing.md) |
+| Keepalive | [docs/keepalive.md](docs/keepalive.md) |
+| Traffic Logging | [docs/traffic-logging.md](docs/traffic-logging.md) |
+| Data Privacy | [docs/data-privacy.md](docs/data-privacy.md) |
+
+---
+
+## Architecture
+
+```
+scorpiox-code/
+  src/              Pure C99 source (463K lines)
+  docs/             All documentation lives here
+  .claude/          Agent skills and project configuration
+```
+
+- **111 standalone binaries** — Each capability is a separate, self-contained executable.
+- **No shared libraries** — Static linking throughout. The binary you install is the binary that runs.
+- **C99 standard** — No extensions, no non-portable constructs. Builds cleanly on any POSIX or MSVC toolchain.
+
+---
+
+## License
+
+Proprietary. All rights reserved.
