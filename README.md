@@ -2,7 +2,7 @@
 
 High-performance native coding assistant with 100% local filesystem sessions.
 
-Pure C99 systems architecture. 463K lines of hand-engineered C. 111 standalone binaries. Zero dependencies. Zero cloud lock-in.
+Pure C99 systems architecture. 191K lines of hand-engineered C. 111 standalone binaries. Zero dependencies. Zero cloud lock-in.
 
 ---
 
@@ -59,7 +59,7 @@ SCORPIOX CODE works with any major LLM backend. Each provider guide covers authe
 
 SCORPIOX CODE uses a deterministic 5-tier configuration cascade. Environment variables, project-level settings, user settings, system defaults, and compiled-in fallbacks are resolved in a fixed priority order.
 
-Full reference: [docs/project-instructions.md](docs/project-instructions.md)
+Full reference: [docs/scorpiox-env.md](docs/scorpiox-env.md)
 
 ---
 
@@ -71,9 +71,12 @@ Full reference: [docs/project-instructions.md](docs/project-instructions.md)
 | Skills System | [docs/skills-system.md](docs/skills-system.md) |
 | Conversation Compaction | [docs/conversation-compaction.md](docs/conversation-compaction.md) |
 | File Editing | [docs/file-editing.md](docs/file-editing.md) |
+| Hooks System | [docs/hooks-system.md](docs/hooks-system.md) |
 | Keepalive | [docs/keepalive.md](docs/keepalive.md) |
 | Traffic Logging | [docs/traffic-logging.md](docs/traffic-logging.md) |
 | Data Privacy | [docs/data-privacy.md](docs/data-privacy.md) |
+| Project Instructions | [docs/project-instructions.md](docs/project-instructions.md) |
+| SCORPIOX Bot | [docs/scorpiox-bot.md](docs/scorpiox-bot.md) |
 
 ---
 
@@ -81,9 +84,8 @@ Full reference: [docs/project-instructions.md](docs/project-instructions.md)
 
 ```
 scorpiox-code/
-  src/              Pure C99 source (463K lines)
+  src/              Pure C99 source (191K lines, 212 .c + 92 .h files)
   docs/             All documentation lives here
-  .claude/          Agent skills and project configuration
 ```
 
 - **111 standalone binaries** — Each capability is a separate, self-contained executable.
