@@ -1,261 +1,268 @@
 # Event Hooks in SCORPIOX CODE: Folder-Based Automation Architecture
 
-You want SCORPIOX CODE to do something every time a specific thing happens — log a line when a session starts, run a linter after a tool fires, post a message the moment the agent goes idle, or gate the whole run on a validation script that must pass before any API call. That is what the **event hook system** is for. It watches the agent's lifecycle and runs *your* scripts at the moments you pick, without you touching the agent's code and without writing a single line of config.
+You want your own scripts to fire when the agent does something — when a session starts, when a tool runs, when a run ends. Every agent harness offers some version of this. Some make you write a config file with a JSON schema, some make you register a callback in code, some make you wire up an external service.
 
-The whole mechanism is a folder. Hooks live in `.scorpiox/hooks/<event>/`. A script sitting in that directory runs when the matching event fires. That is the entire registration step. There is no manifest, no JSON to validate, no TOML to keep in sync, no matcher syntax to learn. The folder is the wiring.
+SCORPIOX CODE does none of that. You drop a script into a folder, and it runs. That is the entire system.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
-> **The whole idea in one line:** drop a script into `.scorpiox/hooks/<event>/` and it runs the next time that event happens — the filesystem *is* the hook registry, and the filename tells you how it behaves.
-
----
-
-## The core principle: the folder is the registry
-
-Most agent harnesses make you *declare* hooks in a config file — a JSON object, a TOML section, a manifest entry — and the harness reads that file to learn what to run and when. SCORPIOX CODE inverts this. It does not read a list you write. It looks at the disk.
-
-Concretely:
-
-1. Each lifecycle event has a directory: `.scorpiox/hooks/session_start/`, `.scorpiox/hooks/tool_use/`, and so on.
-2. Every eligible file inside an event directory is a hook for that event.
-3. **Add a file** = add a hook. **Delete a file** = remove a hook. **Rename a file** to prefix it with an underscore = disable it without deleting it.
-4. There is no separate registry to update, and no schema to keep valid. A file you cannot parse is simply skipped, never a crash.
-
-The practical consequence is that hooks behave the way you would expect from a well-behaved shell: they are ordinary, inspectable files you can open, `git` track, diff, and copy between machines. They are not config blobs bound to one harness's internal format.
+> **The whole idea in one line:** hooks are scripts you place in `.scorpiox/hooks/<event>/`. No config file, no registration step, no schema — the folder *is* the registration, and the filename decides whether it blocks.
 
 ---
 
-## The lifecycle events
+## The layout
 
-The system knows a set of lifecycle events. Each one is a directory you can put scripts in. The full list (run `scorpiox-hook events` to print it):
+Everything lives under a single directory, `.scorpiox/hooks/`, with one subfolder per event:
 
-| Event | When it fires | Typical data |
-|-------|---------------|--------------|
-| `session_start` | A new session begins | model, provider, log level |
-| `session_end` | A session ends gracefully | — |
-| `session_clear` | The user clears the session | — |
-| `user_message` | The user sends a message | message length |
-| `agent_run_start` | The agent begins a run | message length |
-| `agent_complete` | The agent finishes a run | turn count, history length |
-| `agent_idle` | The agent is stopped and waiting at the prompt | — |
-| `subagent_complete` | A sub-agent finishes a run | turn count, history length |
-| `agent_cancelled` | The user cancels the agent | reason, turn count |
-| `tool_use` | A tool is invoked | tool name, tool id |
-| `mcp_call` | An MCP server tool is called | server, tool |
-| `api_response` | An API response is received | turn, stop reason, token counts |
-| `api_error` | An API error occurs | error, status code |
-| `api_retry_wait` | A transient API error, before resending | status, attempt, delay |
-| `api_retry_resume` | The agent resends after a retry wait | attempt, turn |
-| `api_retry_exhausted` | Retries are used up | status, attempt count, turn |
-| `compact` | The conversation is compacted | from/to message counts |
-| `hook_failed` | A hook exits non-zero | exit code, hook name |
+```
+.scorpiox/
+└── hooks/
+    ├── session_start/
+    │   ├── 01-notify.sh
+    │   └── sync-01-validate.sh
+    ├── tool_use/
+    │   └── log-tool.sh
+    ├── agent_complete/
+    │   └── 02-report.py
+    └── ...one folder per event...
+```
 
-Two details worth knowing up front:
-
-- **The events are open, not closed.** The list above is the set the harness emits. But the runner happily accepts *any* event name — if you `scorpiox-hook emit my_custom_event` and there is a `.scorpiox/hooks/my_custom_event/` directory, your scripts run. You are not limited to the built-ins.
-- **Hooks are enabled by default.** A single kill switch (the `HOOKS_ENABLED` setting) turns the whole system on or off. When it is off, no scripts run and nothing is logged.
-
----
-
-## Sync vs. async, decided by the filename
-
-This is the part that replaces an entire config schema with a naming convention. The **prefix of the filename** tells the runner how to treat the hook.
-
-| Filename pattern | Behaviour |
-|------------------|-----------|
-| `01-notify.sh` | **Async** (default). Fire-and-forget; the agent does not wait for it. |
-| `sync-01-validate.sh` | **Sync**. The runner blocks until it exits, and checks the exit code. |
-| `_disabled.sh` | **Skipped.** An underscore prefix disables the hook without deleting it. |
-| `.hidden.sh` | **Skipped.** A dot prefix disables the hook without deleting it. |
-
-The numeric prefix (`01-`, `02-`) does not just look tidy — it sets the **order**. Hooks always run in sorted filename order, so `01-` runs before `02-` before `03-`. Deterministic, every run, no extra ordering key to maintain.
-
-### What sync buys you
-
-An **async** hook is detached: the runner launches it and moves on. Use it for anything that is a side effect — logging, notifications, metrics, a message to Slack. The agent does not care about the result, and a slow or failing async hook can never hold up a turn.
-
-A **sync** hook is a gate. The runner waits for it to finish and reads its exit code. If *any* sync hook exits non-zero, the runner aborts and **skips all async hooks for that event**. That is how you turn a hook into a checkpoint: a `sync-` validation script that fails on a bad state stops the event's async work in its tracks.
-
-In the agentless / headless path this is load-bearing: the `session_start` sync hooks run before the agent loop starts, and a non-zero exit is captured and surfaced as the run's result. A sync `session_start` hook is effectively a "do not proceed unless this passes" guard.
-
----
-
-## What your script receives
-
-Every hook, regardless of event or sync/async, is handed the same four positional arguments:
-
-| Argument | Meaning | Example |
-|----------|---------|---------|
-| `$1` | Event name | `session_start` |
-| `$2` | Session id | `2026_09_29_prickly_hamilton` |
-| `$3` | ISO timestamp (UTC) | `2026-09-29T04:30:00Z` |
-| `$4` | The event data as JSON | `{"model":"opus","provider":"claude_code"}` |
-
-The same values are also exported as environment variables, so a script can read them positionally *or* by name — whichever is clearer:
-
-| Variable | Value |
-|----------|-------|
-| `SX_EVENT` | The event name (same as `$1`) |
-| `SX_SESSION_ID` | The session id (same as `$2`) |
-| `SX_CWD` | The working directory |
-| `SX_HOOKS_DIR` | The `.scorpiox/hooks` path |
-
-`$4` is the part that makes hooks composable across events: it is the JSON payload the harness attached to that specific event, so a `tool_use` hook sees `{"tool":"Bash","id":"..."}` while an `api_response` hook sees token counts and the stop reason. The same script shape can branch on `$1` and read the payload from `$4`.
-
----
-
-## Supported script types
-
-Any of the following extensions run out of the box; the runner picks the right interpreter from the extension, so you do not need the executable bit set:
+A hook is just a file inside the event folder that matches one of the supported types:
 
 | Extension | How it runs |
 |-----------|-------------|
-| `.sh` | `/bin/sh <script>` (CRLF line endings are auto-fixed before running) |
-| `.py` | `python3 <script>` |
+| `.sh` | `/bin/sh <script>` (CRLF line endings are fixed automatically) |
 | `.ps1` | `pwsh -NoProfile -File <script>` |
+| `.py` | `python3 <script>` |
 | `.bat` | `cmd.exe /c <script>` (Windows only) |
-| anything else | Executed directly; on Unix it must carry a shebang and the executable bit |
+| other | executed directly (must have a shebang on Unix and be executable) |
 
-The CRLF auto-fix is a quiet reliability detail: a `.sh` hook written on one machine and checked out on another runs cleanly instead of failing on stray carriage returns.
-
----
-
-## Execution order: the contract
-
-When an event fires, the runner does exactly this, in this order:
-
-1. **Discover** every eligible hook in the event directory and sort it by filename.
-2. **Run all sync hooks first**, one at a time, sequentially, blocking.
-3. **If any sync hook exits non-zero**, stop and **skip the async phase entirely**.
-4. **Otherwise run all async hooks**, each detached and in parallel.
-
-So the mental model is: *sync hooks are the gate, async hooks are the side effects, and a failed gate silences the side effects.* You never have to reason about two hooks racing over a shared file — the order is the sort order, and sync strictly precedes async.
+No extension, no shebang, not executable, nothing to do. That is the whole discovery rule.
 
 ---
 
-## Per-session logging
+## The events
 
-Every hook run is logged, per session, so "did my hook actually run, and what did it print" has a one-file answer:
+SCORPIOX CODE fires 18 lifecycle events through this system. The full list is what `scorpiox-hook events` prints:
 
-| Location | When |
-|----------|------|
-| `.scorpiox/sessions/<id>/hooks.log` | The default for any hook that fired inside a named session |
-| `.scorpiox/hooks/logs/hook.log` | The fallback when there is no session context |
+| Event | Fires when |
+|-------|------------|
+| `session_start` | A new session begins |
+| `session_end` | A session ends gracefully |
+| `session_clear` | The user runs `/clear` |
+| `user_message` | The user sends a message |
+| `agent_run_start` | The agent begins processing |
+| `agent_complete` | The agent finishes a run |
+| `agent_idle` | The agent has fully stopped and is waiting at the prompt |
+| `subagent_complete` | A sub-agent finishes a run |
+| `agent_cancelled` | The user cancels the agent |
+| `tool_use` | A tool is invoked |
+| `mcp_call` | An MCP server tool is called |
+| `api_response` | An API response is received |
+| `api_error` | An API error occurs |
+| `api_retry_wait` | A transient API error — the agent is waiting to resend |
+| `api_retry_resume` | The agent is resending after the retry wait |
+| `api_retry_exhausted` | The agent has used all its retries and the loop stops |
+| `compact` | The conversation has been compacted |
+| `hook_failed` | An agentless hook exited non-zero |
 
-Each entry records the event, the hook name, whether it was sync or async, the hook's combined stdout/stderr, its exit code, and how long it took. Async hooks write straight to that log; sync hooks echo to the terminal *and* the log. You can reconstruct a session's entire hook behaviour from a single file.
+The event set is open, not closed. You can create a folder for any name you like — `emit` will silently no-op if there are no hooks in it, and it will run whatever is there if there are. The 18 above are the ones the agent itself emits; the rest of the surface is yours to define.
+
+---
+
+## Sync vs. async: the filename does the work
+
+Every hook is either **sync** or **async**, and the decision is made entirely by the filename:
+
+| Filename pattern | Mode | Behavior |
+|------------------|------|----------|
+| `01-notify.sh` | async (default) | Fire-and-forget; forked in parallel with the other async hooks |
+| `sync-01-validate.sh` | sync | Runs in order, blocks until it exits, exit code is checked |
+| `_disabled.sh` | skipped | Any name starting with `_` is not executed |
+| `.hidden.sh` | skipped | Any name starting with `.` is not executed |
+
+The execution contract per event is fixed:
+
+1. **All sync hooks run first**, sorted by filename, sequentially, blocking.
+2. **If any sync hook exits non-zero, the run aborts.** Async hooks for that event are skipped, and the failure is reported.
+3. **All async hooks run after**, sorted by filename, forked in parallel.
+
+This gives you two clean guarantees without any configuration:
+
+- **Ordering.** Name your sync hooks `01-`, `02-`, `03-`, and they run in that order. There is no config field for priority; the filename is the priority.
+- **Gating.** A failing sync hook cancels the async fan-out. This is how you build a guardrail: `sync-00-block-bad-input.sh` can inspect the payload and, if it decides to bail, prevent the notification hooks from firing.
+
+Because async hooks run in parallel and their exit codes are not checked, use them for observability and side effects — logging, alerts, telemetry, notification. Use sync hooks for anything that should be able to stop the flow.
+
+---
+
+## What a hook receives
+
+Every hook gets the same four positional arguments, in the same order, no matter which event it is:
+
+```sh
+$1 = event name       # "session_start"
+$2 = session ID       # "2026_02_10_cool_newton" or "none"
+$3 = ISO timestamp    # "2026-02-10T20:12:59Z"
+$4 = JSON data        # '{"model":"opus"}' or '{}'
+```
+
+On top of that, four environment variables are set for the duration of the hook:
+
+| Variable | Value |
+|----------|-------|
+| `SX_CWD` | Working directory the hook is running in |
+| `SX_HOOKS_DIR` | `.scorpiox/hooks` |
+| `SX_EVENT` | The event name (convenience mirror of `$1`) |
+| `SX_SESSION_ID` | The session ID (convenience mirror of `$2`) |
+
+The JSON payload in `$4` is the event-specific context — for `api_response` it includes token counts and stop reason, for `tool_use` it includes the tool name and ID, for `compact` it includes the before/after sizes. Each event carries a sample payload you can see with `scorpiox-hook events`.
+
+A minimal shell hook looks like this:
+
+```sh
+#!/bin/sh
+# .scorpiox/hooks/agent_complete/01-report.sh
+echo "[hook] run finished: turns=$(echo "$4" | jq .turns) session=$2" >> ~/agent-runs.log
+```
+
+A sync hook that gates on a condition:
+
+```sh
+#!/bin/sh
+# .scorpiox/hooks/session_start/sync-01-check-quota.sh
+USAGE=$(jq -r .turns <<< "$4")
+if [ -n "$USAGE" ] && [ "$USAGE" -gt 1000 ]; then
+    echo "Quota exceeded" >&2
+    exit 1   # blocks async hooks for this event
+fi
+exit 0
+```
 
 ---
 
 ## The `scorpiox-hook` CLI
 
-The runner is also a small command-line tool for managing and debugging hooks. It is standalone (no library dependencies) and is what the agent harness calls internally to fire each event.
+The CLI is a standalone binary that ships next to the main executable. It has six subcommands:
 
 | Command | What it does |
 |---------|--------------|
-| `scorpiox-hook events` | Print the list of known events and their descriptions. |
-| `scorpiox-hook init` | Scaffold every known event directory under `.scorpiox/hooks/`. |
-| `scorpiox-hook list [--event <name>]` | List installed hooks per event, tagged as sync or async, with disabled ones counted. |
-| `scorpiox-hook install <event> <file> [--sync]` | Copy a script into the event's directory. `--sync` prefixes the name with `sync-`. |
-| `scorpiox-hook test <event> [name] [--data '{json}']` | Run the event's hooks once with sample data and report pass/fail per hook. |
-| `scorpiox-hook emit <event> [--data '{json}'] [--session <id>]` | Fire an event on demand (this is what the harness does internally). |
+| `scorpiox-hook init` | Scaffolds all 18 event folders under `.scorpiox/hooks/` |
+| `scorpiox-hook events` | Lists every event with a one-line description |
+| `scorpiox-hook list [--event <name>]` | Lists installed hooks, with `[SYNC]` / `[ASYNC]` tags and a disabled count |
+| `scorpiox-hook install <event> <script> [--sync]` | Copies a script into the event folder (adding `sync-` if requested), fixes CRLF, chmods `+x` |
+| `scorpiox-hook test <event> [hook_name] [--data '{json}']` | Runs a hook with sample data in the foreground so you can see its output |
+| `scorpiox-hook emit <event> [--data '{json}'] [--session <id>]` | Fires an event directly from the shell (same path the agent uses) |
 
-The two you will reach for most often: `init` once to lay out the tree, and `test` to prove a hook behaves before you let it run in a real session. `test` feeds each hook the same four arguments and sample JSON, prints its output, and reports a pass/fail per hook so you can iterate without starting a full conversation.
-
-### A minimal end-to-end example
+A typical first-time setup is:
 
 ```sh
-# 1. Lay out the event directories
-scorpiox-hook init
-
-# 2. A side-effect hook: log every session start
-mkdir -p .scorpiox/hooks/session_start
-cat > .scorpiox/hooks/session_start/01-announce.sh <<'EOF'
-echo "session started: $SX_SESSION_ID ($1) at $3"
-EOF
-
-# 3. A gate hook: fail the run before it starts if the tree is dirty
-cat > .scorpiox/hooks/session_start/sync-00-check-clean.sh <<'EOF'
-[ -z "$(git status --porcelain 2>/dev/null)" ] || {
-  echo "working tree is dirty" >&2
-  exit 1
-}
-EOF
-
-# 4. Prove it without a live session
-scorpiox-hook test session_start
+scorpiox-hook init                       # create the 18 folders
+scorpiox-hook install agent_complete ~/hooks/report.sh
+scorpiox-hook list                       # see what you have
+scorpiox-hook test agent_complete        # try it with sample data
 ```
 
-The `sync-00-` hook runs first (it sorts before `01-`), and because it is sync, a non-zero exit aborts the event and the async `01-announce.sh` never runs. The gate and the side effect, in two files.
+`test` is the debugging workhorse — it runs the hook synchronously in the foreground with the canonical sample payload for that event (or whatever you pass with `--data`), so you can watch the output without waiting for a real run to happen.
 
 ---
 
-## Disabling, and the kill switch
+## Where the output goes
 
-- **One hook:** rename it with a `_` or `.` prefix. It is ignored until you rename it back. No config edit.
-- **One event:** remove (or prefix) everything in that event's directory.
-- **Everything:** set `HOOKS_ENABLED` to `0`. The whole system goes quiet — no scripts, no hook logging — until you set it back to `1`. It is on by default.
+Every hook execution is logged. The log path depends on whether the hook fired inside a real session:
 
----
+- **Inside a session:** `.scorpiox/sessions/<id>/hooks.log`
+- **Outside a session** (e.g. from `scorpiox-hook emit` with no `--session`): `.scorpiox/hooks/logs/hook.log`
 
-## How this compares to the other harnesses
-
-The comparison that matters is *registration model*, because that is what you live with every time you add, disable, or reorder a hook. SCORPIOX CODE registers hooks by their presence on disk; the others register them in a configuration file they parse.
-
-| Harness | How hooks are registered | Where a hook lives | How you disable one | What you write |
-|---------|--------------------------|--------------------|---------------------|----------------|
-| **SCORPIOX CODE** | A script in `.scorpiox/hooks/<event>/`. Filesystem is the registry. | A plain file in a per-event folder. | Rename to a `_` / `.` prefix. | A script. The filename encodes sync/async and order. |
-| **Claude Code** | A JSON object in `settings.json` mapping lifecycle events (e.g. `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `Notification`) to arrays of `{matcher, command}` entries. | In the settings file as JSON. | Edit the JSON and remove the entry. | JSON, with a matcher string per entry. |
-| **Codex** | A `notify` hook declared in `~/.codex/config.toml` — a command the CLI invokes. | In the TOML config. | Edit the TOML. | A TOML command entry. |
-| **Pi** | Wired through the agent's configuration rather than a drop-in tree of scripts. | In the agent config. | Edit the config. | Config entries bound to the harness's event model. |
-| **Hermes** | Declared in the agent's configuration / manifest. | In the config or manifest. | Edit the config. | Config entries bound to the harness's event model. |
-
-Read that table and the pattern is the same one that shows up everywhere else in this product:
-
-| | **Config-file harnesses** | **SCORPIOX CODE** |
-|---|---|---|
-| **Registration** | Declare the hook in a file the harness parses. | The hook *is* a file in a folder. |
-| **Schema** | Must be valid JSON / TOML; a typo can break parsing. | No schema. A bad file is skipped, not fatal. |
-| **Ordering** | An explicit order key or array position you must maintain. | The filename sort order. |
-| **Disabling** | Edit and save the config. | Rename the file. |
-| **Inspecting** | Read and mentally parse a config blob. | Open, diff, and `git` track a script. |
-| **Portability** | Bound to that harness's config format. | Copy the folder; it runs anywhere. |
-
-The last row is the one the others cannot copy without changing their model. A hook you wrote for SCORPIOX CODE is a plain script. You can copy it into another project, run it by hand from a shell, or point it at a different event by moving it into a different directory. It is not a fragment of someone else's config file.
-
-None of the other approaches are wrong — JSON hooks with matchers are more expressive for per-tool matching, and TOML `notify` is fine for "send me one message when X happens." The trade-off is that SCORPIOX CODE optimizes for the case where **the hook is a real program you already have**, not a config value. If your automation is a script, the folder model keeps it a script.
+Each entry records the start time, the event, the hook name, whether it was sync or async, the captured stdout and stderr (for sync hooks; async hooks append directly to the log file), and the exit code with duration. This is the only place you need to look when a hook misbehaves — there is no separate tracing system.
 
 ---
 
-## When to use what
+## Disabling hooks
 
-- **Async hooks** for pure side effects: logging, notifications, metrics, posting to a channel. They cannot block or break a turn.
-- **Sync hooks** for gates: validation, preconditions, anything where "must pass before we continue" is the point. A non-zero exit stops the event.
-- **The numeric prefix** to pin an order you depend on (`00-` for the gate, `10-` for setup, `20-` for the rest).
-- **`_` / `.` renaming** to keep a broken or experimental hook around without running it.
-- **`scorpiox-hook test`** before trusting a hook in a live session — it is the cheapest way to see exactly what a hook will do with representative data.
+Three levels of control, all by convention:
+
+1. **Per hook:** rename the file to start with `_` or `.`. The scanner skips it.
+2. **Per event:** remove the event folder, or empty it. `emit` silently no-ops when a folder has no hooks.
+3. **Global kill switch:** set `HOOKS_ENABLED` to `0`. No hooks fire at all, regardless of event. This is the escape hatch for production environments where you want the agent to run but the side-channel scripts to stay quiet.
+
+There is no per-event config file, no allow-list, no policy layer. If you want a hook to stop running, you stop it by not having it there.
+
+---
+
+## How this compares to other agent harnesses
+
+SCORPIOX CODE's design sits deliberately on one side of a line that most harnesses cross over. The line is: *do you configure a hook, or do you place a hook?*
+
+### Claude Code
+
+Claude Code hooks are defined in **JSON settings files** (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`, managed policy files, plugin manifests). A hook is a nested structure: pick an event, add a matcher group that narrows which tool calls trigger it, and define one or more handlers (shell command, HTTP endpoint, MCP tool call, prompt, or agent). Handlers receive the event context as JSON on stdin and return a decision via exit code (`0` = no decision, `2` = block) or a structured JSON body.
+
+This is a powerful system — the matcher + handler model gives fine-grained control, and the JSON-out contract lets hooks feed context back to the model. The cost is that you are writing a configuration document in a schema, not a script. The hook is not the thing that runs; the hook is the declaration of the thing that runs.
+
+SCORPIOX CODE has no matcher layer. If a script is in the folder, it runs for that event. If you want to condition on the tool name, the tool name is in `$4` and you branch in your script. That is a smaller surface, but it also means the "hook" and the "code" are the same artifact, which is the whole point of the folder model.
+
+### Codex
+
+Codex's hook surface is smaller and more purpose-specific. The primary mechanism is a single `notify` command in `config.toml` — a shell command that Codex invokes with a JSON payload for notifications. There is also a lifecycle-hooks layer loaded from `hooks.json` or an inline `[hooks]` block, gated behind a feature flag, primarily oriented at managed/enterprise deployments (with an `allow_managed_hooks_only` policy in `requirements.toml`).
+
+The `notify` path is close in spirit to SCORPIOX CODE's async hooks — a single command, JSON in, fire-and-forget — but it is one hook for one purpose, not a folder per event. The lifecycle layer is closer to an admin policy mechanism than a user-facing automation surface.
+
+### Hermes
+
+Hermes (Nous Research) runs four separate hook systems in parallel: **gateway hooks** (a `HOOK.yaml` + `handler.py` pair per hook, loaded from `~/.hermes/hooks/<name>/` at gateway startup), **plugin hooks** (registered in code via `ctx.register_hook("pre_tool_call", ...)`), **shell hooks** (declared in a `hooks:` block in `profile config.yaml`, pointing at shell scripts), and **outbound webhooks** (a `hooks.outbound:` list that pushes signed lifecycle events to external HTTP endpoints).
+
+Gateway hooks are the closest cousin to SCORPIOX CODE's folder model — a directory per hook, a manifest file declaring which events it listens for, a handler that runs on match. The difference is that Hermes requires a manifest (`HOOK.yaml`) *and* a handler per hook, and the handler is a Python module imported in-process. SCORPIOX CODE collapses both into the file itself: the filename is the event subscription, the file is the handler, and the extension picks the interpreter. No manifest, no import, no registration.
+
+### Pi
+
+Pi (earendil-works) has no standalone hook system in the same sense. Its extension mechanism is **TypeScript modules** that call `pi.on("<event>", handler)` to subscribe to lifecycle events (`before_agent_start`, `tool_call`, `tool_result`, `message_end`, `turn_end`, `agent_end`, and others). Handlers run in-process in the Pi runtime, in registration order, and can transform data, replace results, or cancel operations depending on the event's declared result type.
+
+This is the most powerful model of the four — handlers are real code with typed inputs and outputs, running in the same process as the agent — but it is also the most coupled. You are writing a module that Pi loads, not a script that sits on disk. There is no "place a file and it works" path; there is a loader, a runtime, and a type surface.
+
+### The trade-off in one table
+
+| Dimension | SCORPIOX CODE | Claude Code | Codex | Hermes | Pi |
+|-----------|---------------|-------------|-------|--------|-----|
+| Where hooks live | `.scorpiox/hooks/<event>/` folders | JSON settings files | `config.toml` + `hooks.json` | Four separate systems | TypeScript extension modules |
+| Registration | Drop a file in the folder | Declare in JSON | Declare in config | Manifest + handler / in code | `pi.on()` in a module |
+| Event selection | The folder name | Event + matcher | Fixed to `notify` / lifecycle events | `events:` list in manifest | `pi.on("<event>")` call |
+| Payload | `$1`–`$4` args + env vars | JSON on stdin | JSON arg to `notify` | Keyword args / JSON | Typed event object |
+| Sync vs. async | Filename prefix (`sync-`) | Per-handler config | N/A (notify is async) | Per-hook config / timeout | In-process, awaited |
+| Blocking behavior | Non-zero exit aborts async phase | Exit code `2` blocks | N/A | `pre_tool_call` can block | Return value cancels |
+| Script types | `.sh`, `.ps1`, `.py`, `.bat`, exec | Shell / HTTP / MCP / prompt / agent | Shell command | Shell / Python / HTTP | TypeScript only |
+| Config file required | No | Yes | Yes | Yes (at least one) | Yes (module must be loaded) |
+
+The common shape is clear: the other four harnesses all require you to describe the hook in some declarative form before it runs. SCORPIOX CODE's position is that the description is redundant — the file on disk *is* the description, and the filesystem is the registry. You trade a layer of expressive configuration for a guarantee you can verify with `ls`: if it is not in the folder, it does not run.
+
+---
+
+## When to use hooks vs. other mechanisms
+
+Hooks are the right tool when you want **deterministic side effects on lifecycle events** — a log line on session start, a notification when a run completes, a guard that blocks a session from starting under certain conditions. They are not the right tool for:
+
+- **Recurring work** (use scheduled callbacks instead — see the callbacks page).
+- **Model-visible context injection** (hooks cannot feed content back to the model; for that, use the filesystem session architecture and let the agent read what it needs).
+- **Interactive permission prompts** (the permission system handles that; a hook can observe a permission request, but it is not the gate).
+
+A good rule of thumb: if you want to *react* to something the agent does, use a hook. If you want to *steer* what the agent does, use a different mechanism — hooks are observers with a narrow blocking capability, not controllers.
 
 ---
 
 ## Gotchas
 
-- **Sync failure silences async.** If even one sync hook exits non-zero, the async phase for that event is skipped entirely. That is the gate working as designed, but it means a flaky sync hook can quietly suppress your notifications. Keep gates deterministic.
-- **Order is the filename sort, not your mental order.** If two hooks must run in a specific sequence, encode it in the names (`01-`, `02-`). Bare names sort too, but the sort is the contract, so make it explicit.
-- **Hooks are on by default and per-event, not global.** A script in `.scorpiox/hooks/tool_use/` only runs on `tool_use`. There is no "runs on every event" directory — put the script in each event directory that needs it, or fire a custom event yourself.
-- **Async output goes to the log, not the terminal.** An async hook's stdout/stderr lands in the session's `hooks.log`. If you are debugging and see nothing on screen, check the log — the hook ran, it just did not echo to your console.
-- **`$4` is JSON, parse it as JSON.** The payload shape differs by event. Reading a field that is absent in some events returns nothing, so branch on `$1` before reaching into `$4`.
-- **Unknown events are legal.** If you emit an event with no directory, nothing happens (no error). If you add a directory for a custom event, your scripts run. The system is open on both sides, which means a mistyped event name is a silent no-op rather than a loud failure.
-
----
-
-## The bottom line
-
-Event hooks in SCORPIOX CODE are a folder, not a config file. A script in `.scorpiox/hooks/<event>/` runs when that event fires; the filename decides whether it gates the run or fires and forgets, and in what order; the four arguments and four environment variables hand it everything it needs; and a per-session log records every run with its exit code and duration. Add a file to add a hook, rename it to disable one, and keep the automation as plain, portable scripts you can diff and version — no schema to satisfy, no manifest to keep in sync.
+- **The sync prefix is `sync-`, not `sync_` or `sync.`.** The scanner checks for the literal prefix `sync-`; anything else is treated as async.
+- **A failing sync hook cancels all async hooks for that event.** It does not cancel other events, and it does not stop the agent. It only stops the rest of the fan-out for the current event.
+- **Async hooks are fire-and-forget.** Their exit codes are logged but not checked, and they run in parallel. If two async hooks write to the same file, you get interleaved output.
+- **CRLF is fixed automatically for `.sh` files**, but only on read. If you edit a `.sh` hook on Windows and commit it with CRLF line endings, the first run will rewrite it to LF. Subsequent runs see the LF version.
+- **`emit` is silent for unknown events.** If there is no `.scorpiox/hooks/<event>/` folder, `emit` returns 0 and does nothing. This is intentional — it means you can add hooks for any event name without coordinating with the agent.
+- **The `test` subcommand always runs hooks synchronously**, even if they are named as async. This is so you can see their output. It does not change how the hook runs in production.
+- **Hooks run as the user running SCORPIOX CODE.** There is no sandbox, no permission boundary, no capability model. A hook can do anything the user can. Treat `.scorpiox/hooks/` as a trusted location — anyone who can write there can run code as you.
 
 ---
 
 ## Related
 
 - [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
-- [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md)
-- [Deterministic File Editing & Developer Autonomy in SCORPIOX CODE](file-editing.md)
-- [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md)
+- [Data Privacy and Zero Data Collection](data-privacy.md)

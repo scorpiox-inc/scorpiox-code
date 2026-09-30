@@ -1,111 +1,106 @@
 # Privacy Architecture and Zero Data Collection Guarantee
 
-Most AI coding tools ship a privacy policy. SCORPIOX CODE ships an architecture that makes the policy a non-issue.
+You hand an agent your code, your prompts, your credentials, and the raw HTTP traffic of your work — and then you are left with a question that no marketing page wants to answer honestly: *where does all of that go?* Most agent tools answer with a "we never store your code" checkbox and a privacy policy you will never read. The real question is narrower and harder: does the tool *know* you are using it, and can it report you back to its makers?
 
-There is no account to create, no server that knows you exist, and no background process that phones home. The reason we can guarantee **zero data collection and zero telemetry** is not that we promise to delete what we collect — it is that there is no collection mechanism to delete. The data never leaves the machine you run it on, except for the model tokens you deliberately send to an endpoint you chose.
+SCORPIOX CODE is built so that the honest answer is **no**. There is no phone-home, no telemetry by default, and no user registration. This page explains the architecture that makes that true, what "zero data collection" actually means in practice, and the one number that proves it.
 
-This page explains what that guarantee means in practice, where your data actually lives, and how to verify the whole thing yourself.
+Docs for SCORPIOX CODE @ `13253cf`.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
-
-> **The whole idea in one line:** your prompts, your code, and your tool output go exactly one place you point them — the model endpoint in your config — and everything else (sessions, logs, history) is a plain folder on your disk that you own outright.
+> **The whole idea in one line:** SCORPIOX CODE runs entirely on your machine, talks only to the model endpoints you configure, writes every session to your own filesystem, and ships with both telemetry switches turned **off** — so by default it sends nothing anywhere that is not a model you pointed it at.
 
 ---
 
-## What "zero data collection" actually means
+## The number that proves it
 
-Three things that come standard in a commercial tool are absent from SCORPIOX CODE **by construction, not by configuration**:
+Here is the most concrete thing a privacy guarantee can produce:
 
-1. **No phone-home.** There is no background heartbeat, no periodic check-in, and no "is this user still alive" ping. If you run SCORPIOX CODE with the network cable unplugged, it does the same thing it does online (against a local endpoint) — it never notices the difference.
-2. **No telemetry pings.** There is no metrics endpoint, no crash-reporting service, and no anonymous usage counter. The binary has nowhere to send a number, so it never sends one.
-3. **No user registration.** You do not sign up. There is no login, no email, no license activation, and no identity tied to your machine. The binary runs because you have it on disk, full stop.
+> **We do not know how many people use SCORPIOX CODE.**
 
-None of these are settings you can flip off. There is nothing to flip — the code path does not exist. That distinction matters: a setting you can disable can be silently re-enabled, a default can drift, a checkbox can be reworded in a terms update. A capability that is not present cannot be switched on later without shipping new code you can inspect.
+We genuinely cannot tell you. There is no sign-in, no device fingerprint, no install counter, and no analytics ping. If you run SCORPIOX CODE today, there is nothing on the other end of the wire that learns you ran it.
 
----
+That is the opposite of how the mainstream agent tools work. OpenCode, Cursor, and the rest track every user: they know their active-user counts, their session durations, and what models and providers are being exercised. They can tell you the number of active users because they **count them** — and counting a user means collecting something about that user.
 
-## The proof: we do not know how many users you are
-
-The cleanest way to understand the difference is the one number every commercial AI coding tool tracks and SCORPIOX CODE fundamentally cannot: **active users.**
-
-Tools like OpenCode and Cursor operate on a connected model. Every session, every prompt, every request is routed through or reported to vendor infrastructure, so they can answer "how many people ran the tool today" with a precise count. That number is the backbone of their analytics, their usage dashboards, and their growth metrics. It is also, necessarily, proof that they know *you* exist and *what* you did.
-
-SCORPIOX CODE has no such mechanism. **We literally do not know how many active users there are.** We cannot produce an "active users today" figure because the only thing that touches the network is your chosen model endpoint, and that endpoint is yours to point anywhere — including a model running on your own LAN. There is no intermediary, no counter, and no record of you.
-
-That is not a marketing claim. It is an architectural fact, and it is the single strongest privacy property a tool can have: **if we did not have to design a way to count you, we never built one.**
+SCORPIOX CODE has no such count, because it has no mechanism to count. "We cannot tell you how many active users we have" is not a humble brag; it is the direct, observable consequence of having no telemetry. A tool that does not track you cannot report you. That is the guarantee, and the architecture below is what makes it hold.
 
 ---
 
-## 100% local filesystem ownership
+## The architecture
 
-Everything SCORPIOX CODE remembers about you lives in a single place: a folder on your local filesystem at `.scorpiox/sessions/`.
+Zero data collection is not a policy promise; it is a property of how the product is built. Three decisions do the work.
 
-Every session, every prompt, every tool execution, and every log line is a plain file in a folder you can open with any text editor, copy, move, or delete. There is no database you cannot read, no encrypted blob you cannot access, and no copy stored somewhere else.
+### 1. It ships with no telemetry, and the switches are off
 
-| What lives there | What it is |
-|------------------|------------|
-| `conversation.json` | The full verbatim transcript — every user message, assistant reply, tool call, and tool result, in order, with timestamps. |
-| `messages/` | The same transcript split into one file per message, so a single exchange can be opened, grepped, or diffed in isolation. |
-| `events/` and `events.jsonl` | A structured, machine-readable event log of what happened and when. |
-| `traffic/` | Raw HTTP request and response data — the literal bytes sent to and from the model. |
-| `agent.log` / `session.log` | Agent-level and runtime logs. |
-| `stats.json` | Live session statistics, written locally for the status bar you are already looking at. |
+A common "trust me" pattern is to build a telemetry pipeline and call it "off by default" while leaving a hidden beacon running. SCORPIOX CODE does not take that risk. The only two reporting paths in the product — **usage tracking** (token counts) and **session-event emission** (per-message events) — both start **disabled** out of the box.
 
-Because it is just files, the ownership is total:
+| Mechanism | What it would report | Default |
+|-----------|----------------------|---------|
+| **Usage tracking** | Token counts per model, rate-limit utilization | **Off** |
+| **Session-event emission** | Per-message session events | **Off** |
+| **Everything else** | — | No network call at all |
 
-- **Read it** — open it in any editor or pager. No proprietary format, no "export" button you have to know exists.
-- **Move it** — copy the folder to another machine and the session comes with it.
-- **Delete it** — remove the folder and the data is gone. There is no server-side copy to request the deletion of, because there never was one.
-- **Back it up** — the folder *is* the backup.
+Nothing in the normal agent loop phones home. The model calls you make are the only thing that leaves the machine, and they go to the endpoint you configured (see the next section). If you do not turn the two switches on, there is no reporting path active — and there is nothing to report *to*, because there is no account to attach it to.
 
-This is the same storage model that powers long-horizon agents on SCORPIOX CODE — see [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md) for how the sessions folder doubles as a queryable archive. The privacy point and the capability point are the same point: **the data is a file you own, not a record we hold.**
+These two are **opt-in, not opt-out**. You must deliberately enable either one, and you control exactly where it points (`USAGE_API_URL`, `EMIT_SESSION_API_URL`). That is the inverse of the usual "privacy policy with an opt-out link" pattern.
 
----
+### 2. Every session lives on your filesystem
 
-## Direct network control: your content goes where you point it
+Nothing about a session — the prompt, the model's responses, the tool calls, the logs, even the raw request/response traffic — is sent to SCORPIOX CODE servers. It is written to your local filesystem under `.scorpiox/sessions/`, in a directory per session:
 
-The only outbound traffic that carries your content goes to the **LLM endpoint you explicitly configure**. Nothing else. That endpoint is entirely yours to choose, which means you control where your code and prompts physically travel.
+```
+.scorpiox/
+└── sessions/
+    └── <session-id>/
+        ├── conversation.json     # the full transcript
+        ├── events/               # per-event records
+        ├── messages/             # per-message files
+        ├── agent.log             # agent activity log
+        ├── stats.json            # live local stats (stays local)
+        └── traffic/              # raw HTTP request/response capture
+```
 
-| Endpoint you configure | Where your content goes |
-|------------------------|-------------------------|
-| **Local inference** (`llama.cpp`, `vLLM`, or any OpenAI-compatible server on your LAN) | Nowhere off your network. Your code and prompts never leave your machine or your LAN. This is the strongest configuration: literally zero external content egress. |
-| **A self-hosted or on-prem endpoint** | Only to infrastructure you operate. You decide who can see it and how it is logged. |
-| **A vendor API you choose** | Only to the endpoint and vendor you selected, for the request you sent. You opted in to that specific transfer, for that specific call. |
+Two things matter here. First, **your data never leaves your machine** unless you move it. The session you just had is a set of files you own, in a location you control, that you can inspect, copy, or delete at will. Second, the agent is built to *read back* these files — its own design treats `.scorpiox/sessions/<id>/` as the source of truth, so the data has a local home rather than a remote one.
 
-The through-line is control: in every case, the destination is a line in your configuration file, not a hard-coded address the tool reaches for on its own. If you do not point the tool at a remote endpoint, there is no remote endpoint to reach. The full cascade of how that endpoint — and every other setting — gets resolved and layered across your machine, project, and session is documented in the configuration reference.
+That is the **100% local filesystem ownership** guarantee: sessions are not records in someone else's database; they are files on your disk.
 
-> **Rule of thumb:** the most private configuration is local inference. Run the model on your own hardware and the "network" your content touches is your own machine.
+### 3. The only network traffic goes where you point it
 
----
+SCORPIOX CODE does not have its own API that your code "calls home" to. The network calls the product makes on your behalf go **exclusively** to the LLM endpoints you have explicitly configured:
 
-## The two switches that prove it is off
+- **Local inference** — a `llama.cpp` or `vLLM` server on your LAN, so the model itself never leaves your network.
+- **Your chosen provider endpoint** — the API base URL and key you supply for the provider you signed up with.
 
-For the two features that *could* have carried information off-machine, SCORPIOX CODE ships them **disabled by default** and makes them strictly opt-in. You can see them resolved in your configuration:
-
-| Setting | Default | What it does when you enable it |
-|---------|---------|---------------------------------|
-| `USAGE_TRACKING` | `0` (off) | Would report per-call token usage to a usage endpoint. Off by default — nothing is reported unless you turn it on. |
-| `EMIT_SESSION_TRACKING` | `0` (off) | Would stream full conversation events to a session endpoint. Off by default — and it is disabled out of the box *specifically because it would transmit actual conversation content.* |
-
-Both are `0` out of the box, and neither sends anything until you explicitly set it to `1`. That is the entire telemetry surface of the product, and it is closed by default. If you want a configuration that can never phone home, leave both at their defaults and point your endpoint at local inference — at that point there is nothing to turn off because there is nothing left to send.
+There is no intermediary relay and no SCORPIOX CODE proxy sitting between you and the model. The traffic-capture feature (which logs every request and response) writes to `.scorpiox/sessions/<id>/traffic/` **locally** so you can audit exactly what was sent and received — not so a vendor can see it. If you can read your traffic capture, the data is yours; if it were going to a third party, the capture would not be the whole story.
 
 ---
 
-## How the rest of the field compares
+## What this looks like in practice
 
-| Dimension | SCORPIOX CODE | Typical connected AI coding tools (OpenCode, Cursor, and the like) |
-|-----------|---------------|---------------------------------------------------------------------|
-| **User registration** | None. The binary runs because you have it. | An account is the entry point; your identity is the record key. |
-| **Do we know you exist?** | No. No registration, no device ID, no anonymous counter. | Yes — the account *is* the tracking record. |
-| **Active-user count** | Unknown by design. There is no counter. | Known and reported; it is the core of their analytics. |
-| **Telemetry / usage pings** | Off by default, opt-in, destination of your choosing. | On by default, reported to vendor infrastructure. |
-| **Where your content lives** | A plain folder on your disk you can read, move, and delete. | Vendor storage you can only see through an export. |
+| Question you should ask any agent tool | SCORPIOX CODE |
+|----------------------------------------|---------------|
+| Do I need to create an account to use it? | No. There is no SCORPIOX CODE account. |
+| Does it report usage when I run it? | Not by default. Both reporting switches ship **off**. |
+| Where does my conversation go? | `.scorpiox/sessions/<id>/`, on your disk. |
+| Where do my model calls go? | Only to the endpoint you configured (local or your provider). |
+| Can the vendor see my prompts or code? | No. They are never sent to a SCORPIOX CODE server. |
+| How do they know I'm a user? | They do not — and that is the point. |
+| Can I audit every byte sent/received? | Yes, the local traffic capture logs it all. |
 
-No account, no counter, no phone-home, no active-user number — because there is no mechanism that would let us count you. What you get instead is the only guarantee a tool can make without asking for your trust: **everything you can see is everything there is.**
+---
+
+## What "zero data collection" is *not*
+
+Honest about the edges:
+
+- **Your model endpoint sees the model traffic.** If you point SCORPIOX CODE at a hosted provider, *that provider* receives the prompts and returns the responses — that is inherent to using a hosted model, not a property of this product. Running local inference removes even that.
+- **The opt-in switches exist.** If you deliberately enable usage tracking or session-event emission, data flows to the URL you configure. The guarantee is that this is **off by default and yours to direct**, not that no such path exists in the code.
+- **Local files are your responsibility.** Because sessions live on your filesystem, deleting a session removes it from your machine — and nothing is kept on a server to restore it. That is the flip side of ownership.
+
+The guarantee is precise: by default, on a normal run, SCORPIOX CODE collects nothing and sends nothing except the model calls you explicitly made to the endpoints you explicitly chose.
 
 ---
 
 ## Related
 
-- [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md)
-- [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
+- [Configuration and Profiles](scorpiox-env.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md)
+- [Traffic Logging](traffic-logging.md)

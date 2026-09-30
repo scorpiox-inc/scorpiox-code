@@ -4,7 +4,7 @@ You have an **OpenAI Codex / ChatGPT** subscription (a ChatGPT Plus, Pro, or Bus
 
 This page walks through the **device-code login**, how the token is stored and kept fresh, how to juggle multiple accounts with profiles (`/profile` and `/use`), how to inspect and refresh the stored token, how to drive a login without a TTY (**machine mode**), and how the Codex subscription differs from standard OpenAI API-key usage.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
 ---
 
@@ -223,7 +223,7 @@ Now make one profile per account. Point `CODEX_CREDENTIALS_FILE` at the right fi
 PROVIDER=codex
 CODEX_TOKEN_SOURCE=local
 CODEX_CREDENTIALS_FILE=~/.codex/accounts/personal.json
-MODEL=gpt-5.5
+MODEL=gpt-5.6-terra
 ```
 
 ```
@@ -261,9 +261,9 @@ With those profiles in place, switching accounts is just switching profiles — 
 | `haiku` | `gpt-5.4-mini` |
 | any full `gpt-*` ID or `codex-*` ID | passed through as-is |
 
-You can pin a specific version per alias by setting `MODEL` to the full ID in your profile, or switch it at runtime with the `/model` command. The other models the endpoint advertises (for example `gpt-5.5` and `codex-auto-review`) can also be set directly in `MODEL`.
+The full IDs the provider knows about at this commit are `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4-mini`, and `codex-auto-review`. You can pin a specific version by setting `MODEL` to the full ID in your profile, or switch it at runtime with the `/model` command.
 
-> Note: the login-offered `codex` profile ships with `MODEL=gpt-5.5` out of the box. Change it to `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.4-mini` (or leave the alias as `opus` / `sonnet` / `haiku`) depending on the model you want by default.
+> Note: the login-offered `codex` profile ships with `MODEL=gpt-5.5` out of the box. Change it to `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.4-mini` (or leave an alias such as `opus` / `sonnet` / `haiku`) depending on the model you want by default.
 
 ---
 
@@ -282,12 +282,11 @@ Sometimes you can't hold a terminal open between "here's the code" and "approve 
 A typical machine-mode login:
 
 ```bash
-# 1. Start — prints the link and the one-time code
+# 1. Start — prints the verify URL and one-time code
 scorpiox-codex-login --start
-#   {"ok":true,"provider":"codex","flow":"device_code","verify_url":"https://auth.openai.com/codex/device","user_code":"XXXX-XXXX","interval":5,"expires_in":900,"hint":"Open the link, enter the code, approve. This page checks automatically."}
+# {"ok":true,"provider":"codex","flow":"device_code","verify_url":"https://auth.openai.com/codex/device","user_code":"XXXX-XXXX","interval":5}
 
-# 2. Open that link on any device, sign in, enter the code, approve.
-
+# 2. Open verify_url on any device, sign in, enter the code.
 # 3. Poll until approved (repeat until "state":"done")
 scorpiox-codex-login --poll
 #   {"ok":true,"provider":"codex","state":"pending","interval":5}
@@ -325,4 +324,3 @@ They run the same underlying OpenAI models, but the **Codex provider bills again
 - [Configuration and Profiles](scorpiox-env.md)
 - [Using the OpenAI Provider](openai-provider.md)
 - [Using Claude Code CLI Subscription in SCORPIOX CODE](claude-code-provider.md)
-- [Using Google Antigravity CLI Subscription in SCORPIOX CODE](antigravity-provider.md)

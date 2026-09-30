@@ -1,277 +1,144 @@
 # Using the /keepalive Command
 
-Every time SCORPIOX CODE sends a request to a cloud model, the provider caches the prompt — the system instructions, the tool definitions, and the full conversation so far — so the next request in the same session does not pay to re-read it all. That cache is fast and cheap to read, but it is short-lived: the provider holds it for a **five-minute time-to-live (TTL)**. If nothing touches it for five minutes, it is gone, and your next message pays the full price to rebuild it from scratch.
+Long agent sessions are expensive to interrupt. Every time you stop and come back, the model's **prompt cache** may have expired, and your next message has to re-send and re-create the entire context from scratch — a slower, more expensive turn. SCORPIOX CODE's **cache keep-alive** solves this: it quietly keeps your context warm while you are away, so when you return, your next message lands on a hot cache instead of a cold start.
 
-For a long agent run where you step away for ten minutes, that means the first reply when you come back is slow and expensive — the provider is re-processing everything.
+The whole thing is driven by one built-in command — **`/keepalive`** — plus a small, draggable popup that shows exactly what is happening. There is also a **`/goal`** shortcut for the most common case: "keep my session alive, and here is what to focus on."
 
-The `/keepalive` command solves this. It arms a background timer that, just before the cache is about to expire, automatically sends a lightweight ping through the normal agent path — same model, same settings, same conversation. Because nothing about the request changed, the provider's cache fingerprint still matches, so the ping **reads from the cache instead of writing to it**, refreshing the TTL. You come back and the first reply is fast, as if you had never left.
+Docs for SCORPIOX CODE @ `13253cf`.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
-
-> **The whole idea in one line:** keep-alive quietly re-taps the prompt cache a little before the provider drops it, so your conversation stays warm while you are away — and the first message you send on return is still a cheap cache read.
+> **The whole idea in one line:** while you are idle, SCORPIOX CODE auto-sends a tiny ping through the normal conversation just before the provider's cache expires. The ping hits the existing cache (it is the same prompt), which refreshes the timer — so your next real message is a cache hit, not a rebuild.
 
 ---
 
-## What the timer actually does
+## Why a prompt cache expires in the first place
 
-The keep-alive timer is a background watcher. It tracks how long it has been since the last API response, and when the configured trigger point is reached it raises a flag. The main loop picks that flag up and sends a real message through the standard agent path — exactly as if you had typed it. Because the conversation, model, and tool configuration are unchanged, the provider's cache fingerprint matches, and the ping lands as a cache **read** rather than a write.
+Most hosted model providers do not keep your full context on a hot shelf forever. They cache it for a short window (on the order of a few minutes) to save themselves cost. While the window is open, follow-up turns are cheap and fast because the provider reads the cached prefix instead of re-processing it.
 
-Two things follow from "the ping is a normal message":
+The moment the window closes, the next turn pays the full price again. For a short task that does not matter. For a long session where you step away — to review something, take a call, or run a build in parallel — it does. You lose the exact speed and cost you were enjoying.
 
-- **It is invisible in spirit, real in substance.** The ping consumes one turn, uses the same model, the same token budget, and the same tool list as anything else. The only reason it is cheap is that it reads a cache instead of building one.
-- **It resets the clock.** A successful ping (a cache hit) restarts the five-minute window, so the cache stays alive as long as pings keep landing before expiry.
+Keep-alive is the fix: instead of letting the window lapse, SCORPIOX CODE nudges the conversation right before it does. Because the nudge is a normal message with the same prompt, it is served from the cache (a **cache read**) and, in doing so, resets the expiry clock. Your context stays warm for as long as you want it to.
 
-The five settings that control it:
+### What a keep-alive ping actually is
 
-| Property | Default | Config key |
-|----------|---------|------------|
-| Enabled at startup | No (opt-in) | `CACHE_KEEPALIVE` |
-| Ping interval (idle seconds before a ping) | 270 s (4 min 30 s) | `CACHE_KEEPALIVE_TRIGGER` |
-| Max consecutive misses before pausing | 1 | `CACHE_KEEPALIVE_MAX_TRIES` |
-| Max total pings before auto-stop | 2 (0 = unlimited) | `CACHE_KEEPALIVE_MAX_PINGS` |
-| Ping message text | `keepalive, respond ok` | `CACHE_KEEPALIVE_MESSAGE` |
+It is not a background process and not a webhook. It is **a real user message sent through the same agent path you use for everything else** — same provider settings, same tools, same model. The only difference is that the timer typed it for you. That has two consequences worth knowing:
 
-The default trigger of 270 s is deliberately set **30 s inside** the 300 s TTL. That leaves a safety margin: even if the provider's clock runs a fraction fast, the ping still lands before the cache expires, so the next real message benefits from the refreshed cache.
+- **The cache fingerprint matches perfectly.** A ping is indistinguishable from your own message, so the provider treats it as a cache read — the mechanism that keeps the cache alive.
+- **It costs a little.** Each ping is a small model call. That is the trade: a few cheap pings to avoid one expensive cold rebuild. You control the rate and the total via the command and the config keys below.
 
 ---
 
-## Command reference
+## The `/keepalive` command
 
-All commands are entered in the chat input line. Type `/keepalive` and press **Tab** to see the available subcommands and a couple of example durations.
+Type `/keepalive` on its own to **toggle the status popup**. With arguments, it controls behavior:
 
 | Command | What it does |
 |---------|--------------|
-| `/keepalive` | Toggle the keep-alive popup open/closed. No settings change — a pure status view. |
-| `/keepalive on` | Turn the timer on. If it was paused, this resumes it. |
-| `/keepalive off` | Pause the timer (state is kept; `on` resumes it later). |
-| `/keepalive enable` | (Re)start the feature from a clean state while it is off. |
-| `/keepalive disable` | Stop the timer entirely and discard statistics. |
+| `/keepalive` | Toggle the popup (show / hide). |
+| `/keepalive on` | Turn keep-alive on — or resume it if it paused. |
+| `/keepalive off` | Pause keep-alive. The context will be allowed to lapse. |
+| `/keepalive enable` | Start the background timer (the full on-ramp). |
+| `/keepalive disable` | Stop the background timer entirely. |
 | `/keepalive show` | Show the popup. |
-| `/keepalive hide` | Hide the popup without touching the timer. |
-| `/keepalive interval <dur>` | Change how long you can stay idle before a ping fires. |
-| `/keepalive message <text>` | Change the text sent as the keep-alive ping. |
-| `/keepalive <duration>` | Arm the timer for a total window (`45m`, `1h30m`, `900s`). |
-| `/goal <text>` | Shortcut for `/keepalive message <text>` (auto-enables). |
+| `/keepalive hide` | Hide the popup. |
+| `/keepalive interval <duration>` | Set how often it pings — e.g. `5m`, `270s`, `1h`. |
+| `/keepalive message <text>` | Set the text of the ping. |
+| `/keepalive <duration>` | Keep the cache alive for a **total** duration — e.g. `45m`, `2h`, `1h30m`. The ping count is computed for you. |
 
-### Toggle the popup
+Durations accept the same compact forms throughout: `90` (seconds), `270s`, `5m`, `2h`, or a mix like `1h30m`.
 
-```
-/keepalive
-```
+### A practical example
 
-With no argument, the command toggles the **keep-alive popup** open or closed. The popup is a floating panel that shows live state, the next-ping countdown, and ping statistics. It does not change any settings — it is a pure status view.
-
-### Turn it on and off
+You are deep in a refactor and need to step away for an hour, but you want the session to be ready the instant you are back. Keep the interval at the default (~4:30) and just set a total:
 
 ```
-/keepalive on
-/keepalive off
+/keepalive 1h
 ```
 
-`on` turns the timer on. If it was previously paused (for example after a cache miss), `on` resumes it. `off` pauses the timer but does not destroy it — the background watcher keeps running, and `on` resumes it later without re-arming.
+SCORPIOX CODE responds with the plan — how many pings at what interval, and whether it is armed and waiting for your next message to create a cache. The popup opens so you can watch it work.
+
+### The `/goal` shortcut
+
+`/goal` is an alias for setting the keep-alive message, with a convenience twist: if keep-alive is off, it **turns itself on**.
 
 ```
-/keepalive enable
-/keepalive disable
+/goal keep the API tests green
 ```
 
-`enable` (re)starts the feature from a clean state — it clears the statistics and re-arms the timer to idle, waiting for the first cached response. It only takes effect while the feature is off; if the timer is already running, `enable` is a no-op. `disable` stops the timer entirely and discards all statistics. Use `disable` when you want the feature gone for the rest of the session, not just paused.
+This sets the ping text to "keep the API tests green" and enables keep-alive if it was disabled. Running `/goal` with no text prints the current goal instead of changing it.
 
-### Arm for a total duration
-
-```
-/keepalive 45m
-/keepalive 1h30m
-/keepalive 900s
-```
-
-Pass a duration directly (no subcommand word) to arm the keep-alive for a **total time window**. The command works out how many pings fit in that window at the current interval and sets the ping cap accordingly. The duration format accepts any combination of `h` (hours), `m` (minutes), `s` (seconds), or a bare number (seconds): `1h30m`, `5m`, `900s`, `270`.
-
-At the default 270 s interval, the window maps to a ping count like this:
-
-| Command | Window | Pings armed |
-|---------|--------|-------------|
-| `/keepalive 45m`   | 2700 s | 10 |
-| `/keepalive 1h`    | 3600 s | 14 |
-| `/keepalive 1h30m` | 5400 s | 20 |
-| `/keepalive 2h`    | 7200 s | 27 |
-
-If no cache exists yet (you have not sent a message that created one), the timer arms in **idle** and activates automatically on the first cached response. The chat confirms this:
-
-```
-Keep-alive for 1h 30m (20 pings every 270s). Armed - starts after your next message creates a cache.
-```
-
-### Change the ping interval
-
-```
-/keepalive interval 5m
-/keepalive interval 270s
-```
-
-Changes the trigger time — how long you can stay idle before a ping fires. The value is a duration, in the same format as the total-duration argument. The change takes effect from the next ping cycle.
-
-### Change the ping message
-
-```
-/keepalive message do nothing
-```
-
-Sets the text sent as the keep-alive ping. The message travels through the normal agent path, so it should be something the model can answer briefly without kicking off a long turn. The default `keepalive, respond ok` is a good template.
-
-### Show and hide the popup
-
-```
-/keepalive show
-/keepalive hide
-```
-
-Explicitly show or hide the popup without toggling. Useful if you want to dismiss the popup without affecting the timer.
+Use `/goal` when you want the ping to double as a reminder of what to focus on; use `/keepalive message <text>` when you just want to change the text.
 
 ---
 
-## The /goal shortcut
+## The keep-alive popup
 
-`/goal` is a one-word alias for setting the keep-alive message. It is handy when you want the ping to carry a specific reminder the model should keep in mind.
+The popup is a small, draggable card (it opens in the top-right by default) that shows the live state of the feature. Drag it anywhere; click **`[X]`** to close it without changing behavior.
 
-```
-/goal finish the refactor
-```
+It shows:
 
-This sets the keep-alive message to `finish the refactor` **and** auto-enables the keep-alive timer if it was disabled. The popup opens to confirm the new message.
+- **State** — in the title: `disabled`, `idle`, `active`, `pinging`, or `paused`.
+- **Interval** — the configured ping interval.
+- **Next ping** — a live countdown to the next ping (while active), or `sending...` while a ping is in flight.
+- **Pings** — how many pings have been sent, against the maximum (when one is set).
+- **Hits / Misses** — how many pings actually read from the cache versus how many came back cold.
+- **Max tries** — the consecutive-miss threshold, with the current streak.
+- **Message** — the text being sent as each ping.
 
-With no argument, `/goal` just prints the current message:
-
-```
-/goal
-```
-
----
-
-## The popup
-
-Type `/keepalive` (no args) or `/keepalive show` to open the popup. It appears in the **top-right corner** of the terminal by default.
-
-```
- Keep-Alive (active)                          [X]
-──────────────────────────────────────────────
- Interval:   4m 30s
- Next ping:  2m 15s
- Pings:      3 / 20
- Hits:       3    Misses: 0
- Max tries:  1 (streak: 0)
- Message:    keepalive, respond ok
-```
-
-| Field | Meaning |
-|-------|---------|
-| **Interval** | The trigger time in human-readable form. |
-| **Next ping** | Live countdown to the next scheduled ping. Shows `sending...` while a ping is in flight, and `--` when no ping is pending. |
-| **Pings** | Total pings sent in the current window, and the cap. |
-| **Hits / Misses** | Pings that read from cache (hits) versus pings that did not (misses). A miss means the cache was already gone when the ping arrived. |
-| **Max tries** | How many consecutive misses are tolerated before the timer pauses. The `streak` count is the current run of consecutive misses. |
-| **Message** | The text that will be sent as the next ping. |
-
-### Moving the popup
-
-Drag it by its **title bar** (the coloured header row): click and hold on the title bar, move, and release to drop it where you want.
-
-### Closing the popup
-
-Click the `[X]` button in the top-right corner, type `/keepalive hide`, or type `/keepalive` again to toggle it closed. Closing the popup does not affect the timer — the keep-alive keeps running.
-
-### Title colours
-
-The title text and its colour reflect the current state:
-
-| State | Title text | Colour |
-|-------|-----------|--------|
-| Disabled | `Keep-Alive (disabled)` | grey |
-| Idle (armed) | `Keep-Alive (idle)` | grey |
-| Active (timer running) | `Keep-Alive (active)` | green |
-| Sending a ping | `Keep-Alive (pinging)` | purple |
-| Paused (after max misses) | `Keep-Alive (paused)` | amber |
+A healthy session sits in `active` with a steadily counting-down **Next ping** and a growing **Hits** count. If you start to see **Misses**, the cache is not surviving between pings — the provider window is shorter than your interval, or the session was interrupted — and the feature will pause itself after the configured number of consecutive misses rather than keep spending on pings that are not helping.
 
 ---
 
-## Status bar indicator
+## The status-bar indicator
 
-When a conversation exists, the bottom status bar shows a small live indicator flush on the right of the bottom line, next to the idle timer:
+You do not need the popup to keep an eye on things. The status bar carries a compact, color-coded indicator:
 
-| Indicator | Meaning |
-|-----------|---------|
-| `KA`    | Keep-alive active, no pings sent yet |
-| `KA:N`  | Keep-alive active, N pings sent so far |
-| `KA*`   | Keep-alive is currently sending a ping |
-| `KA\|\|`| Keep-alive is paused |
-| `KA-`   | Keep-alive is idle (armed, waiting for first cache) |
-| *(blank)* | Keep-alive is disabled |
+- **Cache timer** — a `T mm:ss` countdown to cache expiry, green when healthy, yellow as it nears, red when it is about to lapse.
+- **Keep-alive state** — a short `KA` marker: `KA` when active, `KA:n` when active with `n` pings already sent, `KA*` while a ping is in flight, `KA-` when armed and idle, and `KA||` when paused.
 
-The indicator is colour-coded — green for active, yellow for pinging, orange for paused, grey for idle — and is purely informational. The same data is in the popup if you want more detail.
+Together these let you glance at the bottom of the screen and know whether your context is warm, without opening anything.
 
 ---
 
 ## Configuration keys
 
-All keys are set in `scorpiox-env.txt` in your SCORPIOX CODE data directory, or in the environment when launching. Every one of them can also be changed at runtime with the `/keepalive` commands above. See [Configuration and Profiles](scorpiox-env.md) for the full config file, cascade, and precedence rules.
+Keep-alive is configured through `scorpiox-env.txt` (any cascade tier, a named profile, or an OS environment variable — see [Configuration and Profiles](scorpiox-env.md)). Command-line changes made with `/keepalive` take effect for the current session; these keys set the defaults it starts from.
 
-### `CACHE_KEEPALIVE`
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `CACHE_KEEPALIVE` | bool | `0` (off) | Master switch. When `0`, keep-alive starts disabled and you turn it on with `/keepalive on`. |
+| `CACHE_KEEPALIVE_TRIGGER` | int (seconds) | `270` | Seconds of idle before a ping is sent. Default is 4:30 — just inside a typical provider cache window. |
+| `CACHE_KEEPALIVE_MAX_TRIES` | int | `1` | Consecutive cache-miss pings before the feature pauses itself. |
+| `CACHE_KEEPALIVE_MAX_PINGS` | int | `12` | Maximum total pings before it stops on its own. `0` means unlimited. The default (~12 pings at 4:30) covers roughly an hour. |
+| `CACHE_KEEPALIVE_MESSAGE` | text | `keepalive, respond ok` | The text of each ping. Override it here, or at runtime with `/keepalive message <text>` / `/goal <text>`. |
 
-| Value | Meaning |
-|-------|---------|
-| `0` | Disabled at startup (default). You can still enable at runtime with `/keepalive on` or a duration command. |
-| `1` | Enabled at startup. The timer arms as soon as the first cached response is received. |
-
-### `CACHE_KEEPALIVE_TRIGGER`
-
-Seconds of idle time before a ping is triggered. Default **270** (4 min 30 s). It must be less than 300 (the five-minute TTL) to be useful. Lower values ping more frequently and keep the cache warmer, at the cost of more ping API calls.
-
-### `CACHE_KEEPALIVE_MAX_TRIES`
-
-Maximum number of **consecutive** cache misses before the timer pauses itself. Default **1**. A miss means the provider did not return any cached tokens for the ping — the cache was already gone. After N consecutive misses the timer pauses to avoid burning API calls on a dead cache. Resume with `/keepalive on`.
-
-### `CACHE_KEEPALIVE_MAX_PINGS`
-
-Maximum **total** number of pings before the timer stops, regardless of hits. Default **2** (roughly 9 minutes at the default 270 s interval). Set to `0` for unlimited. When you use a duration argument (`/keepalive 1h`), this value is overwritten automatically to fit the window.
-
-### `CACHE_KEEPALIVE_MESSAGE`
-
-The text sent as the keep-alive ping. Empty (default) resolves to `keepalive, respond ok`. Maximum **256 characters**. The message is sent as a real user message through the standard agent path, so it should be something the model can answer briefly.
+Because a `/keepalive <duration>` command derives the ping count from the interval and the total time, the keys are the steady-state defaults and the command is the session-level override. Pick whichever you find natural — the popup reflects whichever is in effect.
 
 ---
 
-## When to use keep-alive
+## How the loop behaves
 
-**Use it when:**
+The behavior is deliberately conservative — it spends a little to save a lot, and it stops spending the moment that is no longer true:
 
-- You are running a long agent task and expect to step away for more than five minutes between checks.
-- You are iterating on a large conversation (100+ turns) and want to avoid the cold-start penalty each time you return.
-- The agent is in a loop (building, testing, fixing) and you want to keep the conversation warm between your interventions.
+1. **Armed, waiting for a cache.** When enabled, keep-alive starts in an *idle/armed* state. It has nothing to protect until a real response has written a cache.
+2. **Active once a cache exists.** The first cached response arms the timer. From then on it watches time-since-last-response.
+3. **Ping just before expiry.** As the idle time approaches the trigger, it sends the ping. The ping is a cache read, which refreshes the window, and the clock resets.
+4. **Self-stops when it stops working.** If pings start coming back cold (cache misses) up to the max-tries threshold, or the total ping budget is reached, it pauses or stops instead of continuing to spend.
 
-**You do not need it when:**
-
-- You are actively typing every few minutes. Your own messages already refresh the cache.
-- You are using a local model. Local inference has no prompt-cache TTL to maintain, so there is nothing to keep alive.
+The net effect: while you are away, your context stays warm on a quiet cadence; the moment the cadence is no longer buying you a cache hit, it stands down.
 
 ---
 
 ## Gotchas
 
-- **The ping goes through the normal agent path.** It consumes a turn and uses the same model, the same token budget, and the same tool list as a normal user message. If the model decides to do something non-trivial in response to the ping message, it will. Keep the message short and unambiguous.
-
-- **A miss is not an error.** If the provider's cache expires between your trigger and the actual API round-trip, the ping will not read from cache. This is expected under load. `CACHE_KEEPALIVE_MAX_TRIES` controls how many misses are tolerated before the timer pauses.
-
-- **The trigger must be less than 300 s.** The provider cache TTL is five minutes. If you set the trigger to 300 s or more, the ping arrives after the cache has already expired and will always miss.
-
-- **`/keepalive off` is a pause, not a full disable.** The background thread keeps running. If you want to stop the thread entirely and free it, use `/keepalive disable`.
-
-- **Closing the popup is not the same as turning it off.** `[X]` and `/keepalive hide` only hide the status panel; the timer keeps pinging in the background.
+- **Pings cost a little each.** A ping is a real model call. The feature exists to avoid a full cold rebuild, but if you are on a tight budget and away for a very long time, set a bounded duration (`/keepalive 30m`) rather than leaving it unlimited.
+- **The provider decides the cache window.** The trigger default assumes a typical few-minute window. If your provider expires caches faster than your interval, you will see **Misses** in the popup and the feature will pause. Lower `CACHE_KEEPALIVE_TRIGGER` to match a short window.
+- **`off` pauses, it does not destroy context.** Pausing lets the cache lapse naturally — the conversation is intact on disk. It just means your next message may pay for a rebuild. See [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md).
+- **`enable`/`disable` vs `on`/`off`.** `enable`/`disable` start and stop the background timer outright; `on`/`off` resume and pause a timer that is already running. For day-to-day use, `on` and `off` are what you will reach for.
 
 ---
 
 ## Related
 
 - [Configuration and Profiles](scorpiox-env.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md)
 - [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
-- [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md)
-- [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md)

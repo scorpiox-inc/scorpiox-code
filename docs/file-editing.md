@@ -1,230 +1,187 @@
 # Deterministic File Editing & Developer Autonomy in SCORPIOX CODE
 
-Every agent harness has to edit your code. That sounds trivial until you watch it fail: a "search-and-replace" that can't find the exact string, a patch that misaligns one line off and silently corrupts a file, or a diff the model has to get byte-perfect or the whole edit is rejected. The editing layer is where most agent tools quietly lose the plot — and where they quietly take your autonomy with it.
+Most AI coding tools make one of two bad bets about how the model should touch your files.
 
-SCORPIOX CODE is built on a different principle: **editing should be deterministic, inspectable, and reversible — and you should never be forced into a single way of doing it.** This page explains the four preferred file tools, why the line-based design removes the whole class of fuzzy-diff failures, and why "preferred" means exactly that: preferred, never locked-in.
+The first bet is **fuzzy search-and-replace**: the model emits a block of "old text" surrounded by context, and the harness searches the file for that block and swaps it in. The second is **full-file rewrite**: the model retypes the entire file from scratch. Both paths share the same failure — the edit you *intended* is not the edit that *lands*, and you find out only when the diff is wrong.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+SCORPIOX CODE takes a different position: **give the agent exact, deterministic line ranges — and never lock you out of doing it your own way.** This page explains how the editing model works, what "deterministic" means in practice, and why you are never trapped in a proprietary editing sandbox.
 
-> **The whole idea in one line:** edit by explicit line range, write the replacement to a plain file you can read, apply it deterministically, and get the changed lines back in the same command — with the full freedom to drop down to any standard tool whenever you want.
+Docs for SCORPIOX CODE @ `13253cf`.
 
----
-
-## The problem: fuzzy editing is a guess
-
-Most harnesses let the agent describe an edit and then *match* it against the file. There are three common shapes, and all three are a guessing game the model plays against your file:
-
-| Mechanism | How it works | How it fails |
-|-----------|--------------|--------------|
-| **Fuzzy / exact search-and-replace** | The model emits an "old string" it expects to find verbatim, plus a "new string". The tool locates the old string and swaps it in. | The old string must match **exactly** — one stray whitespace, one tab-vs-spaces, one line the model mis-remembered, and the edit is rejected. The model has to reconstruct the file from memory instead of pointing at it. |
-| **Unified diffs** | The model emits a `---`/`+++` diff with context lines. The tool applies it positionally. | Off-by-one line drift, missing context, or a hunk that no longer matches after an earlier hunk shifts things. A bad diff either fails or, worse, lands in the wrong place. |
-| **Whole-file overwrite** | The model re-emits the entire file and the tool replaces it. | Expensive, and any line the model forgets or rewrites is now a silent change you have to diff yourself to notice. The model is effectively re-typing your file. |
-
-The common thread: **the model is re-generating part of your file from memory and hoping it matches.** Precision drops as files get longer, and every failure costs a turn.
-
-SCORPIOX CODE removes the guess. You don't describe a string to find — you **name the line range**. The edit is a fact about the file's structure, not a reconstruction of its contents.
+> **The whole idea in one line:** an agent does not guess "somewhere around the function I was looking at." It says *replace lines 55 through 57* — a coordinate, not a guess — and you can inspect the exact edit before it commits.
 
 ---
 
-## The four preferred file tools
+## The problem with "clever" edit formats
 
-SCORPIOX CODE ships a small, sharp set of file tools. They are the *preferred* path for reading, searching, and editing — and each one is a plain, inspectable command with no hidden state.
+The dominant approaches in other harnesses each have a known failure mode:
 
-| Tool | Job | What makes it deterministic |
-|------|-----|-----------------------------|
-| **`scorpiox-readfile`** | Read a file or a line range, numbered. | Every line comes back as `N: content`, so the line numbers you edit against are the line numbers the file actually has. |
-| **`scorpiox-grep`** | Search files. | Zero-dependency, cross-platform, auto-skips `.git`, `node_modules`, `__pycache__`, and binary files; handles every common encoding. |
-| **`scorpiox-editfile`** | Apply line-based edits. | Edits by explicit `LINE start-end` range, applied bottom-up so numbers always refer to the original file. |
-| **`CreateFile`** | Write a file from scratch. | Used to author each replacement file as a real, named file on disk — something you and the agent can both open and read. |
+| Approach | Where it breaks |
+|----------|-----------------|
+| **Fuzzy search-and-replace block** | The model's "old text" must match the file byte-for-byte. A renamed variable, a reformatted line, or a duplicate snippet anywhere in the file breaks the match. The harness reports "cannot find matching context" and the agent loops. |
+| **Unified diff / patch** | The model must reproduce the surrounding context lines and exact line numbers for every hunk. Off by one line and the patch is rejected or misapplied. |
+| **Full-file overwrite** | The model retypes the entire file. Whitespace drift, dropped blank lines, and unrelated formatting changes creep in silently — and the approach stops scaling past a few hundred lines. |
+| **Proprietary apply model** | A vendor model regenerates the file from a prompt. Non-deterministic, opaque, and you cannot audit exactly what changed line by line. |
 
-The pattern is the same every time: **read the range you care about, write the replacement to a file, apply it, verify it.** Nothing is matched, nothing is fuzzy, nothing is hidden in the model's head.
+The common thread: **the edit boundary is implicit.** The model has to *infer* where its change starts and ends from prose context, and every inference is a place it can be wrong.
 
-### Reading: numbers you can point at
+SCORPIOX CODE makes the boundary **explicit and numeric.**
+
+---
+
+## Full control: deterministic line ranges
+
+The core primitive is a numbered line range. The workflow is three steps, and every step is inspectable before it commits:
+
+### Step 1 — Read with line numbers
+
+`scorpiox-readfile` prints every line prefixed with its exact line number, so the agent (and you) see the real coordinates in the file rather than an abstract context window:
 
 ```bash
-# Whole file, numbered
-scorpiox-readfile src/main.c
-
-# Just the region you're about to edit
 scorpiox-readfile src/main.c 50 80
 ```
 
-Output:
-
 ```
 50: void handle_request(req) {
-51:     ptr = lookup(req->id);
-52:     if (!ptr) {
+51:     if (ptr == NULL) {
+52:         log_warning("null pointer");
 53:         return -1;
 54:     }
 ```
 
-Because the numbers are authoritative, the next step is not "hope the string matches" — it is "replace lines 52–54."
+### Step 2 — Write the edit as a small, reviewable file
 
-### Searching: the boring, reliable kind
-
-```bash
-# Recursive, with line numbers
-scorpiox-grep -rn "handle_request" src/
-
-# Case-insensitive, only C files
-scorpiox-grep -ri --include "*.c" "TODO" .
-
-# Regex with 3 context lines
-scorpiox-grep -rnE -C 3 "TODO|FIXME" src/
-```
-
-It does the job you expect from `grep` — including regex, context, and file filters — without you having to remember which variant your platform shipped.
-
-### Editing: by line range, not by guess
-
-An edit is a small **replacements file** with one or more blocks. Each block opens with `LINE <start>-<end>` and closes with `END`; the new content sits in between. Three operations cover everything:
-
-| Operation | How | Meaning |
-|-----------|-----|---------|
-| **Replace** lines | `LINE 5-7` + new content + `END` | Swap lines 5–7 for the new content. |
-| **Delete** lines | `LINE 5-7` + `END` (empty block) | Remove lines 5–7. |
-| **Insert** before line N | `LINE N-(N-1)` + new content + `END` | `LINE 3-2` inserts before line 3. |
-
-A full edit to `src/main.c`, replacing the null-check block with a proper one:
+The edit is a plain-text **replacements file**. Each block names a `LINE <start>-<end>` range and the new content. You can open this file and read exactly what is about to happen:
 
 ```
-LINE 52-54
-    if (ptr == NULL) {
-        log_error("lookup failed for id=%d", req->id);
-        return -1;
-    }
+LINE 51-53
+if (ptr == NULL) {
+    return -1;
+}
 END
 ```
 
-Two properties make this deterministic rather than clever:
+### Step 3 — Apply and verify in one shot
 
-1. **Bottom-up application.** Blocks are applied highest line number first, so every line number always refers to the **original** file. Inserting ten lines at the top does not shift the line you want to change next. No re-computation, no drift.
-2. **Multiple blocks, one file.** You can batch independent edits in a single replacements file and apply them all in one shot.
-
-### The workflow, end to end
-
-1. **Read** the target region to get real line numbers.
-   `scorpiox-readfile src/main.c 50 60`
-2. **Create the replacements file** with the `CreateFile` tool, under a unique, descriptive name each time.
-   Path: `/tmp/sx_edit_fix_null_check.txt`
-3. **Apply and verify in one command.**
-   `scorpiox-editfile src/main.c /tmp/sx_edit_fix_null_check.txt --verify 2`
-4. **If the verify output is not what you expected**, read again, write a new replacements file (new name), and apply again.
-
-Step 3 is the one that removes the failure mode entirely.
-
-### `--verify`: the edit prints itself back
-
-Most editing tools tell you "applied" and hope. SCORPIOX CODE's `--verify` **re-reads the file it just wrote and prints back the changed lines** in the same numbered format as `scorpiox-readfile`, with optional context.
+`scorpiox-editfile` applies the change and, with `--verify`, prints back the changed region with surrounding context:
 
 ```bash
 scorpiox-editfile src/main.c /tmp/sx_edit_fix_null_check.txt --verify 2
 ```
 
+The three operations map cleanly to the range arithmetic:
+
+| Operation | Syntax | What it does |
+|-----------|--------|--------------|
+| **Replace** a range | `LINE 5-7` + new content + `END` | Overwrites lines 5 through 7 with the new content |
+| **Delete** a range | `LINE 5-7` + `END` (empty block) | Removes lines 5 through 7 |
+| **Insert** before line N | `LINE N-(N-1)` + new content + `END` | `LINE 3-2` inserts before line 3 (start > end signals insert) |
+
+### Why "deterministic" is doing real work
+
+- **Line numbers always refer to the original file.** Edits are applied **bottom-up** (highest line number first), so an earlier range is never shifted by a later insertion. There is no "the line number has now moved, so the next block is wrong" class of bug.
+- **The result is verifiable before you trust it.** `--verify N` re-reads the file and prints the changed lines with `N` lines of surrounding context. If the output is not what you expected, you read again, write a new replacements file, and re-apply. You never have to *assume* the edit landed correctly.
+- **No escaping, no context matching.** Because the target is a numeric range, there is no substring to escape and no surrounding text that has to match. The failures that plague fuzzy edit formats have no surface to occur on.
+- **Multiple edits in one pass.** One replacements file can contain several `LINE ... END` blocks. They are all applied in a single invocation, bottom-up, so every coordinate stays valid.
+
+### Encoding and line-ending fidelity
+
+Files in the real world are not always plain UTF-8 with Unix line endings. SCORPIOX CODE detects and preserves the file's existing encoding and line endings automatically:
+
+| Property | Supported values |
+|----------|-----------------|
+| **Encodings** | UTF-8, UTF-8 with BOM, UTF-16 LE, UTF-16 BE |
+| **Line endings** | LF (Unix) and CRLF (Windows) |
+
+You do not declare any of this. Read the file, edit it, and it comes back in the same encoding with the same line endings it started in. A Windows checkout is not silently converted; a UTF-16 file is not mangled into Latin-1.
+
+---
+
+## The tools you get, and the tools you are never blocked from
+
+SCORPIOX CODE ships a built-in **preferred-file-tools** skill that recommends a small, high-precision set of cross-platform utilities:
+
+| Tool | Purpose | Replaces |
+|------|---------|----------|
+| `scorpiox-readfile` | Read a file or a line range with exact line numbers | `cat`, `head`, `tail`, `Get-Content` |
+| `scorpiox-grep` | Recursive, encoding-aware search; auto-skips `.git`, `node_modules`, `__pycache__`, and binary files | `grep`, `find`, `Select-String` |
+| `scorpiox-editfile` | Deterministic line-range edits with `--verify` | `patch`, `sed`, `awk` |
+| `CreateFile` | Write the small, uniquely-named replacements file | — |
+
+These are **preferred**, not **required.** That word is the whole philosophy.
+
+The moment a harness says "you *must* use my proprietary edit tool and nothing else," it has quietly reduced your leverage. You can no longer use the editor, the shell command, or the native utility you already trust — even when your own tool would do the job better. You are now inside a sandbox defined by one vendor's abstraction, and every task routes through a format you cannot fully control or audit.
+
+SCORPIOX CODE does not do that:
+
+- **Standard tools always work.** `sed`, `awk`, `patch`, `git apply`, your editor of choice — all remain available. Nothing is disabled.
+- **Direct shell commands always work.** If the deterministic line-range tool is the right fit, use it. If a one-liner is the right fit, use the one-liner. The agent and you decide per task.
+- **Native utilities always work.** The preferred tools are cross-platform and dependency-free, but they are an option, not a cage.
+
+The high-precision tools are *good at a specific job*. They are not a lock-in mechanism the vendor can tighten later.
+
+---
+
+## How this compares to the other harnesses
+
+| Dimension | SCORPIOX CODE | Claude Code / Cursor / OpenCode | Aider | Pi / Hermes |
+|-----------|---------------|---------------------------------|-------|-------------|
+| **Edit boundary** | Explicit numeric line range (`LINE 55-57`) | Implicit — inferred from surrounding context text | Explicit line numbers, but inside a diff hunk | Varies; often implicit context matching |
+| **Failure mode** | Line number out of range — explicit and recoverable | "Cannot find matching context" — opaque, agent loops | Hunk does not apply — fuzz-dependent, may silently misapply | Context mismatch or full-file drift |
+| **Inspectable before commit** | Yes — the replacements file is plain text you can open and review | No — the context block is parsed by the harness, not by you | Partial — the diff is readable but the hunk anchors are fragile | Depends on harness |
+| **Multiple edits in one pass** | Yes — multiple `LINE` blocks in one file, applied bottom-up | Usually one edit per tool call | Yes, but each hunk must anchor independently | Varies |
+| **Encoding safety** | UTF-8, UTF-8 BOM, UTF-16 LE/BE; LF and CRLF preserved automatically | Most assume UTF-8 / LF; BOM and UTF-16 files can break | Assumes UTF-8 by default | Varies |
+| **Can you bypass the tool?** | Yes — shell, `sed`, `patch`, your editor all work | No — the harness controls how edits reach the filesystem | No — Aider's patch pipeline is the only path | Varies |
+| **Lock-in risk** | None — the tools are preferred, never forced | High — you are trapped in the harness's editing model | High — you are trapped in Aider's diff pipeline | Medium to high |
+
+The distinction is not that SCORPIOX CODE's tools are the only ones that can work. It is that **you are never blocked** — and the precision tool is something you can *opt into* because it is genuinely better for a common task, not something the vendor *forces* because it controls the pipeline.
+
+---
+
+## A concrete example
+
+Suppose you are working in a C file and need to add a null-pointer guard.
+
+```bash
+# 1. Read the exact lines you need, with their real line numbers
+scorpiox-readfile src/main.c 50 80
+
+# 2. Write the edit to a uniquely-named replacements file
+#    /tmp/sx_edit_fix_null_check.txt:
+#        LINE 55-57
+#        if (ptr == NULL) {
+#            return -1;
+#        }
+#        END
+
+# 3. Apply and verify in one step
+scorpiox-editfile src/main.c /tmp/sx_edit_fix_null_check.txt --verify 2
 ```
---- verify (lines 50-56) ---
-50: void handle_request(req) {
-51:     ptr = lookup(req->id);
-52:     if (ptr == NULL) {
-53:         log_error("lookup failed for id=%d", req->id);
-54:         return -1;
-55:     }
-56: }
-```
 
-`--verify` prints the changed region; `--verify N` adds `N` boundary lines of context on either side. You are not trusting the tool's claim — you are **reading the actual result on disk**, in the same format you used to plan the edit. The fuzzy-diff failure mode ("did that land where I meant?") is replaced by a line you can look at.
+`--verify 2` prints the changed region with two lines of context above and below, in the same numbered format as `scorpiox-readfile`. If the output is not what you expected, you read again, write a new replacements file with a different name, and re-apply. There is no hidden state, no session to reset, and no proprietary format to learn.
 
-### Encoding and line endings: preserved, not rewritten
+### Practical notes
 
-A file is more than its text. `scorpiox-editfile` detects the original encoding and line endings and writes the result back in the **same ones** — no silent BOM added or stripped, no Unix-to-Windows line-ending conversion that breaks a `.gitattributes` policy or a build.
-
-| Dimension | What is preserved |
-|-----------|-------------------|
-| **Encoding** | UTF-8, UTF-8 with BOM, UTF-16 LE, UTF-16 BE |
-| **Line endings** | LF (Unix) and CRLF (Windows), per the file's dominant style |
-
-Edit a UTF-16 file on Windows with CRLF line endings and it stays UTF-16 with CRLF. The tool changes the lines you told it to change and nothing else.
+- **Always read before you edit.** The line numbers in your replacements file must match what `scorpiox-readfile` showed you. Reading first is what makes the range deterministic.
+- **Unique filenames per edit.** Give each replacements file its own descriptive name (e.g. `sx_edit_fix_null_check.txt`, `sx_edit_add_logging.txt`). There is no reason to reuse or delete previous ones.
+- **Bottom-up means order does not matter.** Whether you write the top-of-file block first or the bottom-of-file block first in the replacements file, the result is the same. The tool sorts and applies from the highest line number down.
+- **Out-of-range is an error, not a silent corruption.** If you specify `LINE 200-250` on a 100-line file, the tool reports the error and does not write anything.
 
 ---
 
-## Developer autonomy: preferred, never locked-in
+## TL;DR
 
-This is the part that matters most, and it is easy to miss in a feature list: **nothing in SCORPIOX CODE forces you to use the preferred tools.**
+- **Deterministic line ranges, not fuzzy matching.** Edits name explicit `LINE start-end` coordinates applied bottom-up, so ranges never drift and line numbers always mean what you think they mean.
+- **Inspectable and verifiable.** The edit is a plain-text replacements file you can read, and `--verify` prints the changed lines back to you before you trust the result.
+- **Encoding and line endings preserved automatically.** UTF-8, UTF-8 BOM, UTF-16 LE/BE, CRLF and LF — no configuration, no surprises.
+- **True autonomy, not lock-in.** The high-precision tools are *preferred*, never *forced*. Standard tools, direct shell commands, and native utilities always work — no proprietary sandbox, no vendor-defined edit format you cannot audit or escape.
 
-`scorpiox-readfile`, `scorpiox-grep`, and `scorpiox-editfile` are high-precision **options**, recommended because they are the least error-prone path. But the agent — and you — are never walled into them:
-
-- **Standard shell tools always work.** `cat`, `head`, `tail`, `grep`, `sed`, `awk`, `patch`, `perl`, whatever your platform ships — they keep working, with no special permission and no wrapper.
-- **Native utilities always work.** Your editor, your build system, your version control — the agent can drive the same commands you would.
-- **You can mix freely.** Read with `scorpiox-readfile`, apply with `sed`, verify with `git diff`. The tools do not compete; they are layers you reach for when you want that precision.
-
-That distinction is the whole point. A tool that *recommends* a method and a tool that *mandates* a method look identical in a demo and behave oppositely in real work. When the preferred tool is the right one, reach for it. When you have a one-liner in `sed` or a patch you already have, use it. SCORPIOX CODE does not take your keyboard away to be "safe."
-
----
-
-## How other harnesses approach it — and the lock-in they introduce
-
-The alternatives are not bad; they are **narrow**. Each one makes a single editing mechanism the only door in and out of your files, and each one optimizes for a scenario it cannot see: that you might want a different one.
-
-| Harness | Dominant editing mechanism | Where it gets rigid |
-|---------|----------------------------|---------------------|
-| **Claude Code** | Search-and-replace blocks (`old_string` / `new_string`), plus multi-edit and whole-file variants. | The old string must match exactly; the model reconstructs it from context and the edit is rejected on the first mismatch. The file is a thing you describe, not a thing you address. |
-| **OpenCode** | Patch / file-write based edits. | Edits are wrapped in the harness's patch format; the file is reached through that format, not directly. |
-| **Aider** | Unified diffs and whole-file / search-replace edit formats. | The model must produce a correct diff; line drift or a hunk that no longer matches fails the edit or falls back to a full rewrite. |
-| **Cursor** | Editor-driven apply, search-replace blocks, whole-file overwrite. | The edit lives inside the IDE's apply flow; precision depends on the model matching the file it is editing. |
-| **Pi** | Search-and-replace blocks. | Same match-or-fail dynamic: the model's string must find the file's string. |
-| **Hermes** | Unified diffs / search-replace. | Diff alignment is positional; a bad hunk lands in the wrong place or is rejected. |
-
-Read the column and a pattern shows up: the model is **regenerating part of the file from memory** and the harness is **the only tool that accepts the result.** That is a sandbox with a polite name. You are not editing your file; you are submitting a guess to a format the harness owns, and the harness decides whether the guess was good enough.
-
-SCORPIOX CODE flips the relationship:
-
-| | **Fuzzy-editing harnesses** | **SCORPIOX CODE** |
-|---|---|---|
-| **Addressing** | "Find this string." | "Change lines N–M." |
-| **Source of truth** | The model's memory of the file. | The file's actual line numbers, read moments before. |
-| **Failure mode** | Mismatch → rejected, or misaligned → silent corruption. | Out-of-range → explicit error. In-range → exactly that range. |
-| **Verification** | Trust "applied." | `--verify` reads the written file back, numbered, with context. |
-| **The edit artifact** | A block the model produced in a turn. | A plain file on disk you can open, diff, and keep. |
-| **Your freedom** | Use the harness's one tool. | Use the preferred tool *or* any standard shell / native command. |
-
-The last row is the one the others cannot copy without changing their model: you can opt out of the precision entirely and still be doing exactly what you intended, with the tools you already know.
-
----
-
-## When to use what
-
-- **Default to the preferred tools** for anything you will read back or verify. `scorpiox-readfile` → `CreateFile` → `scorpiox-editfile --verify` is the path where "did it land where I meant?" has a one-glance answer.
-- **Use `--verify N` with context** when the edit is near code you didn't write in that turn — the boundary lines let you confirm you didn't nudge the wrong function.
-- **Batch with multiple blocks** when several independent changes touch one file; one apply, one verify.
-- **Drop to a standard tool** for the obvious one-liner. `sed`, `awk`, `patch`, `perl`, `git apply` — if you would do it by hand, the agent can too. There is no penalty for choosing the direct route.
-- **Write the replacement file with a unique name each time** (`/tmp/sx_edit_fix_header.txt`, `/tmp/sx_edit_add_logging.txt`). Never reuse or delete prior edit files — they are a free audit trail of exactly what changed.
-
----
-
-## Gotchas
-
-- **Read before you edit.** The line numbers you pass to `LINE start-end` must be the file's real numbers. Read the region first; the `N: content` output is the contract.
-- **Insert uses `start > end`.** To insert *before* line 3, write `LINE 3-2`. A normal `start-end` (start ≤ end) replaces or deletes; only `start > end` inserts.
-- **Line numbers are 1-based and refer to the original file.** Because blocks apply bottom-up, earlier blocks do not shift later ones. You do not re-number as you go.
-- **Out-of-range is a hard error, not a guess.** Pointing at a line past the end of the file fails loudly with the file length. Nothing is applied to the wrong line.
-- **The replacement file is plain text.** `LINE` must start the line and `END` must be a line by itself. Indentation inside a block is preserved verbatim — it becomes the file's content.
-- **`--verify` reads the file you just wrote, not your intended output.** That is the point — it is a check on reality, not a confirmation of intent. If it is wrong, the file is wrong; read, rewrite, reapply.
-
----
-
-## The bottom line
-
-Fuzzy editing is a quiet tax. Every mismatched string, every off-by-one diff, every whole-file retyping is a turn the model spends re-guessing a file it already has in front of it — and a place where a bad guess can silently touch the wrong line.
-
-SCORPIOX CODE makes editing a fact instead of a guess: point at the line range, write the replacement to a file you can read, apply it deterministically bottom-up, and read the result back with `--verify`. The encoding and line endings come back exactly as they went in. And none of it is mandatory — the moment a standard shell command or a native tool is the right move, you and the agent are free to use it.
-
-That is the whole offer in one sentence: **complete, inspectable control over your files, with no abstraction standing between you and the disk.**
+You get precise, deterministic control over every edit — and you keep the right to do it any way you want.
 
 ---
 
 ## Related
 
-- [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md)
-- [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md)
-- [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
+- [Configuration and Profiles](scorpiox-env.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md)
+- [Data Privacy and Zero Data Collection](data-privacy.md)

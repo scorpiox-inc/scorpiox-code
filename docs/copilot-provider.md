@@ -1,10 +1,10 @@
 # Using GitHub Copilot CLI Subscription in SCORPIOX CODE
 
-You have a **GitHub Copilot** subscription (a Copilot Individual, Pro, Business, or Enterprise seat — any account the official Copilot CLI can sign into) but you don't want to meter per-token against an API key. You can use it directly in SCORPIOX CODE. Instead of billing API tokens, the **Copilot provider** signs you in with the same OAuth device-code flow the official Copilot CLI uses and runs requests against the Copilot endpoint your subscription already pays for.
+You have a **GitHub Copilot** subscription (Free, Pro, or Business — any account the official Copilot CLI can sign into) but you don't want to meter per-token against a separate `OPENAI_API_KEY` or juggle a paid API key just to run models you already pay for. You can use it directly in SCORPIOX CODE. Instead of billing API tokens, the **Copilot provider** signs you in with the same OAuth **device-code flow** the official Copilot CLI uses and runs requests against the Copilot endpoint your subscription already pays for.
 
-This page walks through the **device-code login**, how the token is stored and kept fresh, how to juggle multiple accounts with profiles (`/profile` and `/use`), how to inspect the stored token and your usage, how to drive a login without a TTY (**machine mode**), and how the Copilot subscription differs from standard API-key usage.
+This page walks through the **device-code login**, how the token is stored and kept fresh, how to juggle multiple accounts with profiles (`/profile` and `/use`), how to inspect your models and quota, how to drive a login without a TTY (**machine mode**), and how a Copilot subscription differs from standard OpenAI API-key usage.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
 ---
 
@@ -12,20 +12,20 @@ Docs for SCORPIOX CODE @ `2b0bffd`.
 
 | Scenario | Example |
 |----------|---------|
-| **You have a GitHub Copilot subscription** | Copilot Individual, Pro, Business, or Enterprise, or a Copilot seat you already pay for |
-| **You don't have (or don't want) an OpenAI / Anthropic API key** | No pay-per-token billing — requests draw on your Copilot allowance |
+| **You have a GitHub Copilot subscription** | Free, Pro, or Business — or a Copilot seat you already pay for |
+| **You don't have (or don't want) an OpenAI API key** | No pay-per-token billing — requests draw on your Copilot plan |
 | **Headless / over SSH** | The login is a device-code flow: open the link and enter the code on any device — no browser and no redirect needed on the box you run from |
 | **Driven by SCORPIO BOT** | The login can be started and polled as separate commands (`--start` / `--poll`) with no open TTY — see [Machine mode](#machine-mode-no-tty) |
 
-If you are instead calling an OpenAI-compatible endpoint with an API key (`OPENAI_API_KEY`), use `PROVIDER=openai`. The two are different billing models — see [Copilot subscription vs. the OpenAI API-key provider](#copilot-subscription-vs-the-openai-api-key-provider) below.
+If you are instead calling the OpenAI API with an API key (`OPENAI_API_KEY`), use `PROVIDER=openai` (or an OpenAI-compatible endpoint). The two are different billing models for overlapping families of models — see [Copilot subscription vs. the OpenAI API-key provider](#copilot-subscription-vs-the-openai-api-key-provider) below.
 
-> **Subscription, not API key.** The Copilot provider authenticates with GitHub OAuth and draws on your account's usage allowance (the same premium-interaction windows the Copilot CLI enforces). It does **not** accept an API key and does **not** bill per token.
+> **Subscription, not API key.** The Copilot provider authenticates with OAuth and draws on your account's included usage (the same premium-interaction quota and premium-model access the official Copilot CLI enforces). It does **not** accept an `OPENAI_API_KEY` and does **not** bill per token.
 
 ---
 
 ## Step 1 — Sign in with the device-code flow
 
-The default login is the **GitHub OAuth device-code flow**, the same one the official Copilot CLI performs. It is deliberately SSH- and headless-friendly: you open a link, sign in to your GitHub account on whatever device you already use, enter a one-time code, and SCORPIOX CODE picks the result up automatically. There is no localhost redirect to capture and no long URL to paste — nothing long-lived ever leaves the terminal, and no browser is required on the machine you're running from.
+The default login is the **OAuth device-code flow**, the same one the official Copilot CLI performs. It is deliberately SSH- and headless-friendly: you open a GitHub link, sign in to your account on whatever device you already use, enter a one-time code, and SCORPIOX CODE picks the result up automatically. There is no localhost redirect to capture and no long URL to paste — nothing long-lived ever leaves the terminal, and no browser is required on the machine you're running from.
 
 ```bash
 scorpiox-copilot-login
@@ -39,8 +39,8 @@ scorpiox-copilot-login v...
 Requesting device code...
 
 ┌─────────────────────────────────────────────────────┐
-│  Visit: https://github.com/login/device              │
-│  Enter code: XXXXXX-XXXXX                            │
+│  Visit: https://github.com/login/device             │
+│  Enter code: XXXX-XXXX                              │
 └─────────────────────────────────────────────────────┘
 
 Waiting for authorization...
@@ -48,17 +48,25 @@ Waiting for authorization...
 
 Do exactly what it says:
 
-1. **Open the printed link** (`https://github.com/login/device`) in your browser — on any device, wherever you're signed in to GitHub.
-2. **Enter the one-time code** shown in your terminal and approve the authorization.
-3. Come back to your terminal. SCORPIOX CODE is already polling in the background; the moment you approve, it exchanges the device code for a token and saves it.
+1. **Open the printed link** in your browser — on any device, wherever you're signed into GitHub.
+2. **Sign in** to your GitHub account and **enter the one-time code** shown in your terminal.
+3. Come back to your terminal. SCORPIOX CODE is already polling in the background; the moment you approve, it receives the access token and saves it.
 
-The code is valid for **15 minutes** (GitHub's window), after which the flow expires — just run the login again for a fresh code.
+SCORPIOX CODE then writes the credential to `~/.copilot/.credentials.json` (mode `0600`) and offers to create a ready-to-use profile (see [Step 2](#step-2--turn-on-the-copilot-provider)). A few things worth knowing about this flow:
 
-SCORPIOX CODE then writes the token to `~/.copilot/.credentials.json` (mode `0600`) and offers to create a ready-to-use profile (see [Step 2](#step-2--turn-on-the-copilot-provider)).
+- **The code is one-time and expires in 15 minutes.** If the prompt times out before you approve, re-run `scorpiox-copilot-login` for a fresh code.
+- **Never share the code.** It is a credential. Anyone who has the code while you're waiting can bind the login to their own account.
 
 ### Overwriting existing credentials
 
-A second login is refused if credentials already exist, so you never silently clobber an account. Force it when you mean to:
+If a credential already exists, the command refuses to clobber it:
+
+```
+Credentials already exist: /home/you/.copilot/.credentials.json
+Use --force to overwrite.
+```
+
+Pass `--force` to log in again and replace the stored token:
 
 ```bash
 scorpiox-copilot-login --force
@@ -125,31 +133,29 @@ All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile,
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `PROVIDER` | choice | *(empty)* | Set to `copilot` to activate this provider. |
-| `COPILOT_TOKEN_SOURCE` | choice | *(empty)* | Where to get the token: `local`, `remote`, `ssh`, `tcp`, or `config`. Use **`local`** for a login you ran with `scorpiox-copilot-login`. |
+| `COPILOT_TOKEN_SOURCE` | choice | `local` | Where to get the token: `local`, `remote`, `ssh`, `tcp`, or `config`. Use **`local`** for a Copilot login you ran with `scorpiox-copilot-login`. |
 | `COPILOT_CREDENTIALS_FILE` | text | *(empty)* | Override the path of the local credential file. Defaults to `~/.copilot/.credentials.json`. Point it at a named account (e.g. `~/.copilot/accounts/work.json`) to pin a profile to a specific login. |
-| `COPILOT_GITHUB_TOKEN` | text | *(empty)* | An explicit official-CLI token (`gho_…`). When set, SCORPIOX CODE uses the official CLI identity directly and skips the token exchange. |
-| `COPILOT_MODEL` | text | *(empty)* | Which model to run. Takes precedence over the generic `MODEL`. Accepts full Copilot model IDs or short aliases (see [Choosing a model](#choosing-a-model)). |
-| `MODEL` | text | *(empty)* | Generic model key, used when `COPILOT_MODEL` is empty. |
+| `COPILOT_GITHUB_TOKEN` | secret | *(empty)* | A Copilot access token to use directly (skips reading the credential file). Convenient for injecting a token from a secret manager. |
+| `MODEL` / `COPILOT_MODEL` | text | *(empty)* | Which model to run. `COPILOT_MODEL` takes precedence over `MODEL`. Accepts Copilot model IDs or short aliases (see [Choosing a model](#choosing-a-model)). |
 | `COPILOT_REASONING_EFFORT` | choice | *(empty)* | Reasoning effort: `low`, `medium`, `high`, or `off`. `REASONING_EFFORT` and `OPENAI_REASONING_EFFORT` are read as fallbacks. |
-| `THINKING` | bool | *(empty)* | Enable extended thinking when the model supports it. |
-| `TOOLS` | bool | *(empty)* | Include the tool-calling block in requests. |
+| `COPILOT_REMOTE_URL` | text | *(empty)* | Token endpoint, used only when `COPILOT_TOKEN_SOURCE=remote`. |
+| `COPILOT_SSH_HOST` / `_PORT` / `_USER` / `_PASS` | text | *(empty)* | Used only when `COPILOT_TOKEN_SOURCE=ssh` — fetch the token from a remote machine over SSH. |
 
-> **For a personal subscription, you only need two keys:** `PROVIDER=copilot` and `COPILOT_TOKEN_SOURCE=local` (plus optionally `MODEL`). The `remote` / `ssh` / `tcp` / `config` sources exist for shared or remote token setups and are not needed for a normal Copilot login.
+> **For a personal subscription, you only need two keys:** `PROVIDER=copilot` and `COPILOT_TOKEN_SOURCE=local` (plus optionally `MODEL`). The `ssh` / `remote` / `tcp` sources exist for shared or remote token setups and are not needed for a normal Copilot login.
 
 ### Where the token lives
 
-On login, SCORPIOX CODE writes the GitHub token to `~/.copilot/.credentials.json` (mode `0600`): a `github_token` field (a `gho_…` access token), the `token_type`, the OAuth `scope`, and a `timestamp` of when it was issued. On every request, `COPILOT_TOKEN_SOURCE=local` reads from that file. No API key is involved, and no key is ever written.
+On login, SCORPIOX CODE writes the OAuth credential to `~/.copilot/.credentials.json` (mode `0600`) with a `github_token` field (the `gho_...` access token), the `token_type` and `scope`, and a `timestamp`. On every request, `COPILOT_TOKEN_SOURCE=local` reads from that file (or from `COPILOT_CREDENTIALS_FILE` if set). No API key is involved, and no key is ever written.
 
 ---
 
 ## Token persistence and automatic refresh
 
-You don't manage token lifetimes. SCORPIOX CODE keeps the credential fresh automatically:
+The Copilot access token is long-lived by design, but the provider still keeps things tidy for you:
 
-- **Proactive refresh.** Ahead of each request, the provider checks whether the stored token needs renewing (with a 5-minute buffer ahead of expiry) and refreshes it before sending, so in-flight work never hits an expired credential.
-- **Cached exchange.** For token types that require a short-lived exchange token, that token is cached under `~/.copilot/` and only re-minted when it is close to expiring — so repeated requests in a session don't churn the network.
-- **Reactive recovery.** If a request still comes back unauthorized (HTTP 401), the provider refreshes once and retries. A second failure after a refresh is reported as a permanent auth error.
-- **Remote / SSH / TCP / config sources always fetch fresh.** In those modes the token is re-fetched on each request (the external endpoint is the source of truth and may have revoked an old token), so there is no local expiry to worry about.
+- **No refresh to manage.** The `gho_` access token from the device-code flow does not carry the short-lived JWT expiry that VS Code's path uses, so there is no token rotation to worry about for a normal personal login.
+- **Reactive recovery.** If a request still comes back unauthorized (HTTP 401), the provider re-fetches the token and retries once. A second failure after a re-fetch is reported as a permanent auth error.
+- **Remote / SSH / TCP sources always fetch fresh.** In `remote`, `ssh`, or `tcp` modes the token is re-fetched on every request (the remote endpoint is the source of truth and may have revoked an old token), so there is no local expiry to worry about.
 - **Manual refresh.** You can force a refresh any time:
 
 ```bash
@@ -158,51 +164,51 @@ scorpiox-copilot-refreshtoken --force    # always refresh
 scorpiox-copilot-refreshtoken --verbose  # also print token details
 ```
 
-### Inspecting the stored token
+### Inspecting the resolved configuration
 
 Use `scorpiox-config` to see resolved values and where each comes from (which cascade tier won):
 
 ```bash
 scorpiox-config            # open the interactive config editor
-scorpiox-config --verbose  # print key values (PROVIDER, COPILOT_TOKEN_SOURCE, MODEL, ACTIVE_PROFILE, …) with their source tier
+scorpiox-config --verbose  # print key values (PROVIDER, COPILOT_TOKEN_SOURCE, MODEL, …) with their source tier
 ```
 
-`--verbose` shows the resolved `PROVIDER`, `COPILOT_TOKEN_SOURCE`, and `MODEL`, so you can confirm you're pointed at the account you expect before a long run. To check exactly which file a `local` token source reads, point `COPILOT_CREDENTIALS_FILE` at it explicitly and compare.
+`--verbose` shows the resolved `PROVIDER`, `COPILOT_TOKEN_SOURCE`, and `MODEL`, so you can confirm you're pointed at the account you expect before a long run.
 
 ### Checking your subscription usage
 
-The provider runs against the same usage allowance the Copilot CLI enforces. Check how full it is with:
+The provider runs against the same quota the official Copilot CLI enforces. Check how full it is with:
 
 ```bash
 scorpiox-copilot-usage            # human-readable summary
 scorpiox-copilot-usage --json     # raw JSON
 ```
 
-You'll see your Copilot plan and the premium-interaction snapshot — entitlement, remaining, credits used, percent remaining, and the quota reset date — so you know when a window resets before you kick off a long run.
+You'll see your plan (`copilot_plan`), the premium-interaction quota (remaining / credits used / percent remaining) and its reset date, so you know when a window resets before you kick off a long run.
 
-You can also list the models your account can see:
+### Listing the models you can use
+
+The full set of model IDs your account is entitled to:
 
 ```bash
-scorpiox-copilot-models           # pretty-print model list
-scorpiox-copilot-models --json    # raw JSON to stdout
+scorpiox-copilot-models            # pretty-printed table of id / name / vendor
+scorpiox-copilot-models --json     # raw JSON
 ```
 
 ---
 
-## Multi-account: profiles and switching
+## Switching between accounts
 
 ### Save more than one login
 
-Log in several accounts with `--name` (see [Named accounts](#named-accounts)). Each writes its own file:
-
 ```bash
-scorpiox-copilot-login --name personal    # → ~/.copilot/accounts/personal.json
-scorpiox-copilot-login --name work        # → ~/.copilot/accounts/work.json
+scorpiox-copilot-login --name personal     # → ~/.copilot/accounts/personal.json
+scorpiox-copilot-login --name work         # → ~/.copilot/accounts/work.json
 ```
 
 ### Bind each login to a profile
 
-Give each account its own profile, pinning `COPILOT_CREDENTIALS_FILE` to the right file:
+Now make one profile per account. Point `COPILOT_CREDENTIALS_FILE` at the right file so the profile always uses that account:
 
 ```
 # ~/.claude/scorpiox-env/copilot-personal.txt
@@ -210,20 +216,25 @@ PROVIDER=copilot
 COPILOT_TOKEN_SOURCE=local
 COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/personal.json
 MODEL=claude-sonnet-5
+```
 
+```
 # ~/.claude/scorpiox-env/copilot-work.txt
 PROVIDER=copilot
 COPILOT_TOKEN_SOURCE=local
 COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/work.json
-MODEL=claude-sonnet-5
+MODEL=gpt-5.1
 ```
 
 ### Switch accounts and models in-session
 
+With those profiles in place, switching accounts is just switching profiles — no re-login, no restart:
+
 ```
-/profile copilot-personal    # persist this account as the default
-/use copilot-work            # hop for this session only
-/model <id>                  # switch the model at runtime
+/profile copilot-work      # persistent — writes ACTIVE_PROFILE, survives restarts
+/use copilot-personal      # session-only — gone when the session ends
+/profile                   # open the profile picker (or list if no picker is installed)
+/profile off               # deactivate the profile
 ```
 
 `/profile` and `/use` both trigger a live provider reload, so the new account and model take effect immediately. If the new profile fails to initialize, SCORPIOX CODE reverts to the previous one. The difference is scope: **`/profile <name>` persists** (it writes `ACTIVE_PROFILE`, so it survives restarts), while **`/use <name>` is session-only** (an in-memory switch that disappears when the session ends). See [Configuration and Profiles](scorpiox-env.md) for the full switching semantics.
@@ -232,7 +243,7 @@ MODEL=claude-sonnet-5
 
 ## Choosing a model
 
-`MODEL` (or `COPILOT_MODEL`) accepts either a full Copilot model ID or a short alias. The alias mapping at this commit is:
+`MODEL` (or `COPILOT_MODEL`) accepts a Copilot model ID or a short alias. At this commit the aliases all resolve to the one Claude id that is proven to work with tools on the official CLI path:
 
 | `MODEL` value | Resolves to |
 |---------------|-------------|
@@ -240,11 +251,11 @@ MODEL=claude-sonnet-5
 | `opus` | `claude-sonnet-5` |
 | `sonnet` | `claude-sonnet-5` |
 | `haiku` | `claude-sonnet-5` |
-| any `claude-*` / `gpt-*` / `gemini-*` / `kimi-*` ID | passed through as-is |
+| any full `claude-*`, `gpt-*`, `gemini-*`, or `kimi-*` ID | passed through as-is |
 
-You can pin a specific version per alias by setting `MODEL` to the full ID in your profile, or switch it at runtime with the `/model` command. Run `scorpiox-copilot-models` to see every ID your account can see and set one directly in `MODEL`.
+The full list your account is entitled to is always available from `scorpiox-copilot-models`. You can pin a specific version by setting `MODEL` to the full ID in your profile, or switch it at runtime with the `/model` command.
 
-> Note: the login-offered `copilot` profile ships with `MODEL=claude-sonnet-5` out of the box. Change it in the profile if you want a different model by default.
+> Note: the login-offered `copilot` profile ships with `MODEL=claude-sonnet-5` out of the box. Change it to any model ID from `scorpiox-copilot-models` depending on the model you want by default.
 
 ---
 
@@ -256,29 +267,25 @@ Sometimes you can't hold a terminal open between "here's the code" and "approve 
 |------|--------------|
 | `--status` | Report the login state for this node (add `--name` for a named account). |
 | `--start` | Begin the login: returns the `verify_url` and the one-time `user_code`, and keeps the flow state for 15 minutes. |
-| `--poll` | One non-blocking check. Returns `pending` until you approve, then the tokens are saved. |
+| `--poll` | One non-blocking check. Returns `pending` until you approve, then the token is saved. |
 | `--cancel` | Drop a pending login. |
 | `--create-profile` | With `--poll`: also write the default `copilot` profile when the login completes. |
 
 A typical machine-mode login:
 
 ```bash
-# 1. Start — prints the link and the one-time code
+# 1. Start — prints the verify URL and one-time code
 scorpiox-copilot-login --start
-#   {"ok":true,"provider":"copilot","flow":"device_code","verify_url":"https://github.com/login/device","user_code":"XXXXXX-XXXXX","interval":5,"expires_in":900,"hint":"Open the link, enter the code, approve. This page checks automatically."}
+# {"ok":true,"provider":"copilot","flow":"device_code","verify_url":"https://github.com/login/device","user_code":"XXXX-XXXX","interval":5,"expires_in":900,"hint":"Open the link, enter the code, approve. This page checks automatically."}
 
-# 2. Open that link on any device, sign in to GitHub, enter the code, approve.
-
-# 3. Poll until approved (repeat until "state":"done")
+# 2. Open verify_url on any device, sign in to GitHub, enter the code.
+# 3. Poll until approved (repeat until the token is saved)
 scorpiox-copilot-login --poll
 #   {"ok":true,"provider":"copilot","state":"pending","interval":5}
-#   {"ok":true,"provider":"copilot","state":"done","logged_in":true,"path":"/home/you/.copilot/.credentials.json","profile":"copilot","profile_created":true}
 ```
 
-Things worth knowing:
+A few things worth knowing about machine mode:
 
-- **State survives between commands.** Between `--start` and `--poll` the flow state lives in `~/.claude/.login-pending/` (mode `0600`), so the two calls can be separate processes on the same node.
-- **Fifteen-minute window.** If you don't approve within 15 minutes the pending state expires and `--poll` fails with `expired` — run `--start` again for a fresh code.
 - **`--poll` is the finish step, not `--finish`.** Copilot is a device-code flow: it's `--start` then `--poll`. A `--finish` call is rejected because Copilot uses the device-code protocol, not paste-code.
 - **One JSON line per call.** Everything is on stdout as a single line; the caller reads the last line that starts with `{`. A failure looks like `{"ok":false,"provider":"copilot","error":"...","detail":"..."}`.
 
@@ -286,32 +293,24 @@ Things worth knowing:
 
 ## Copilot subscription vs. the OpenAI API-key provider
 
-It's easy to confuse the two because they can run the same model families. Here's the difference:
+It's easy to confuse the two because they can both run the same families of models. Here's the difference:
 
 | | **Copilot provider** (this page) | **OpenAI API-key provider** (`PROVIDER=openai`) |
 |---|---|---|
 | `PROVIDER` value | `copilot` | `openai` |
-| **Authentication** | GitHub OAuth device-code login (`scorpiox-copilot-login`) | `OPENAI_API_KEY` bearer token |
-| **Billing** | Draws on your GitHub Copilot subscription (premium-interaction windows) | Pay-per-token API usage against the key's account |
-| **Endpoint** | GitHub Copilot's own endpoint | Any OpenAI-compatible `/v1/chat/completions` server (local or remote) |
-| **Local / air-gapped** | No — requires a live GitHub Copilot subscription | Yes — can point at llama.cpp, vLLM, SGLang, or any self-hosted endpoint |
+| **Authentication** | OAuth device-code login (`scorpiox-copilot-login`) | `OPENAI_API_KEY` bearer token |
+| **Billing** | Draws on your GitHub Copilot plan (included premium usage) | Pay-per-token OpenAI API usage |
+| **What you need** | A GitHub Copilot Free / Pro / Business account | An OpenAI API key and a platform account |
+| **Token lifecycle** | Long-lived OAuth access token, re-fetched on 401 | Static API key, no refresh |
+| **Endpoint** | `api.githubcopilot.com` / `api.business.githubcopilot.com` chat completions | Any OpenAI-compatible `/chat/completions` |
 
-They can run the same underlying models, but the **Copilot provider bills against your existing subscription** while the **OpenAI API-key provider bills per token against your API key** (and, via `openai`, can point at any OpenAI-compatible server, local or remote). Pick the one that matches how you already pay for models. See [Using the OpenAI Provider](openai-provider.md).
-
----
-
-## Gotchas
-
-- **The login command and the provider are separate.** `scorpiox-copilot-login` writes the token file and the profile. You still need `PROVIDER=copilot` active (via `/profile`, `/use`, or `ACTIVE_PROFILE`) for SCORPIOX CODE to use it.
-- **The credentials file holds a live GitHub token.** `~/.copilot/.credentials.json` can renew your account session — don't commit it, don't share it, and don't loosen its permissions.
-- **`COPILOT_TOKEN_SOURCE=local` reads a fixed default path.** To use a named account at runtime, set `COPILOT_CREDENTIALS_FILE` to that account's file — the profile you're given points at the default path, not at named accounts.
-- **`/profile` persists; `/use` does not.** Use `/profile` to make a Copilot account your standing default and `/use` to hop to it for a single session without writing anything.
-- **Machine mode is additive.** `--status` / `--start` / `--poll` / `--cancel` are only active when you pass one of those flags; an unflagged `scorpiox-copilot-login` is the interactive flow. `--finish` is not supported (Copilot is a device-code flow). Pending machine state expires after 15 minutes.
+They can reach the same underlying models, but the **Copilot provider bills against your existing subscription** while the **OpenAI API-key provider bills per token against your API key** (and, via `openai`, can point at any OpenAI-compatible server, local or remote). Pick the one that matches how you already pay for models. See [Using the OpenAI Provider](openai-provider.md).
 
 ---
 
-## Related
+## See also
 
 - [Configuration and Profiles](scorpiox-env.md)
 - [Using the OpenAI Provider](openai-provider.md)
-- [Codex provider](codex-provider.md)
+- [Using OpenAI Codex & ChatGPT Subscription in SCORPIOX CODE](codex-provider.md)
+- [Using Claude Code CLI Subscription in SCORPIOX CODE](claude-code-provider.md)

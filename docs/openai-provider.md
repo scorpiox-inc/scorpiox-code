@@ -4,7 +4,7 @@ SCORPIOX CODE can talk to **any** server that exposes an OpenAI-compatible `/v1/
 
 This page is the full how-to: the keys that make it work, a **verified launch command** for each of the three modern self-hosted engines (llama.cpp, vLLM, SGLang), how to pick and switch a model, how to tune thinking, reasoning effort, and timeouts, and the one URL gotcha that trips almost everyone up.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
 ---
 
@@ -49,11 +49,8 @@ All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile,
 | `OPENAI_MODEL` | text | `default` | Provider-specific model name. Used only when the generic `MODEL` slot is not set. In practice, set `MODEL`. |
 | `OPENAI_TIMEOUT` | text | `1800` | HTTP request timeout in seconds (30 minutes). Raise it for very large models or slow prefill. |
 | `OPENAI_STREAM` | bool | `0` | `1` streams internally (SSE) and reassembles the body so time-to-first-token can be measured. `0` (default) uses a single non-streamed response. |
-| `OPENAI_CHAT_TEMPLATE_KWARGS` | JSON | *(empty)* | A JSON object forwarded verbatim to the request's `chat_template_kwargs`. This is how you control engine-side template behavior (thinking on/off, etc.). |
-| `OPENAI_REASONING_EFFORT` | choice | *(empty)* | `low`, `medium`, `high`, or `max`. Injected into the request as `reasoning_effort` for engines that read it. Empty means it is not sent. |
-| `REASONING_EFFORT` | choice | *(empty)* | Generic alias with the same value set. |
-
-> **You must point `OPENAI_BASE_URL` at your server.** There is no built-in server address, so if the URL is empty or unreachable you will get an `OPENAI_BASE_URL not configured` / connection error. The launch examples below show the exact value for each engine.
+| `OPENAI_CHAT_TEMPLATE_KWARGS` | text | *(empty)* | A JSON object merged into every request's `chat_template_kwargs` — the llama.cpp / vLLM / SGLang chat-template channel (e.g. `{"enable_thinking": true}`). |
+| `OPENAI_REASONING_EFFORT` | choice | *(empty)* | `low` / `medium` / `high` / `max`. Injected into the request as `reasoning_effort`; only engines that read it act on it. Leave empty to not send it. |
 
 ---
 
@@ -68,6 +65,8 @@ OPENAI_BASE_URL=http://localhost:8080/v1       # wrong — becomes .../v1/v1/cha
 
 - **Do not include** `/v1`, `/v1/chat`, or `/v1/chat/completions` in the URL.
 - A `404` after a long prompt usually means the base URL is wrong (extra path, or the wrong port). Confirm the endpoint answers with `scorpiox-openai-models <url>` before touching anything else.
+
+The helper utilities are lenient about it: `/models`, `/slots`, and `/metrics` strip a trailing `/v1` or `/models` for you when they build their own request, so a slightly messy `OPENAI_BASE_URL` still works for *inspecting* the server even if it would 404 for chat.
 
 ---
 
@@ -121,9 +120,9 @@ llama-server \
 |------|--------------|
 | `--model` | The GGUF model file to load. |
 | `--host` / `--port` | Bind address. Defaults `127.0.0.1:8080`. |
-| `--ctx-size` | Maximum context window (tokens). |
+| `--ctx-size` | Maximum context window (tokens). `0` loads the size recorded in the model file. Size it to fit the model — see the note below. |
 
-llama.cpp's Jinja chat-template engine is **enabled by default**, so it accepts `chat_template_kwargs` from the request — including `enable_thinking` for reasoning models. Point the provider at it:
+llama.cpp's Jinja chat-template engine is **enabled by default** on the server, so it accepts `chat_template_kwargs` from the request — including `enable_thinking` for reasoning models. Point the provider at it:
 
 ```
 PROVIDER=openai
@@ -143,6 +142,8 @@ OPENAI_CHAT_TEMPLATE_KWARGS={"enable_thinking": true}
 Flip the value to `false` to turn thinking off for a model that defaults it on.
 
 > **Check your slot, not just the port.** llama.cpp can serve multiple concurrent slots. Use the `/slots` slash command in SCORPIOX CODE (it reads `OPENAI_BASE_URL` if you don't pass a URL) to see live slot occupancy, or run `scorpiox-llamacpp-slots http://localhost:8080`.
+
+> **Size the context to the model.** If you launch the server with a small `--ctx-size` and the conversation outgrows it, llama.cpp rejects the oversized prompt. SCORPIOX CODE no longer wedges on this: it reads the server's true context cap from the error, lowers its auto-compact threshold just under that cap, and triggers a compact so the session continues. Still, pick a `--ctx-size` the model actually supports — recovery keeps you going, it does not buy you a bigger window.
 
 ---
 
@@ -197,7 +198,7 @@ sglang serve \
 | `--model-path` | Model path (Hugging Face repo id or local path). This is the name in `/v1/models` — set it as `MODEL`. |
 | `--host` / `--port` | Bind address. Defaults `127.0.0.1:30000`. |
 
-SGLang's tool calling is **on by default** (its `tool_call_parser` defaults to `auto`), so you do not need the equivalent of vLLM's `--enable-auto-tool-choice`. It reads `chat_template_kwargs` from the request, including `enable_thinking`, so the SCORPIOX CODE knob reaches it directly:
+SGLang reads `chat_template_kwargs` from the request, including `enable_thinking`, so the SCORPIOX CODE knob reaches it directly. Tool calling is handled by a `tool_call_parser` that you point at a model-matched parser (it is `None`/auto by default, so the model's own template drives tool-call extraction):
 
 ```
 PROVIDER=openai
@@ -227,7 +228,7 @@ Again, **no `/v1`** in the base URL — the path is appended for you. The key is
 
 ## Choosing and switching a model
 
-- **List what the server offers:** `scorpiox-openai-models <url>` prints the `/v1/models` list. The values in `models[].id` are your candidates for `MODEL`.
+- **List what the server offers:** the `/models` slash command (or `scorpiox-openai-models <url>` from a shell) prints the `/v1/models` list. The values in `models[].id` are your candidates for `MODEL`.
 - **In-session switch:** `/model <name>` switches the active model without editing any file. This is the fastest way to A/B two models.
 - **Persist a choice:** write `MODEL` into your user or project `scorpiox-env.txt`, or into a named profile.
 - **Reasoning effort:** `/reasoning_effort <low|medium|high|max|off>` sets it in-session; `OPENAI_REASONING_EFFORT` is the config key. It is injected into the request and only has an effect on engines that read it.
@@ -248,9 +249,8 @@ Because the translation is endpoint-agnostic, the exact same session works again
 ## Tuning for slow or large models
 
 - **`OPENAI_TIMEOUT`** — raise it (for example `3600`) when prefill on a large MoE model exceeds the 30-minute default.
-- **`OPENAI_STREAM=1`** — streams internally and reassembles the response so time-to-first-token can be reported. Useful on servers that do not return timing information. Response handling is otherwise unchanged.
-- **`OPENAI_CHAT_TEMPLATE_KWARGS`** — a per-engine JSON object for template behavior (the most common one is `{"enable_thinking": true}` or `{"enable_thinking": false}`).
-- **`OPENAI_REASONING_EFFORT`** — for reasoning-capable models, sets how much reasoning the engine spends. Empty means "not sent," so the engine uses its own default.
+- **`OPENAI_STREAM`** — set `1` on servers that do not return per-request timing (vLLM, SGLang) so SCORPIOX CODE can stream internally, reassemble the body, and still measure time-to-first-token for `~pp` / `~tg`. Servers that ignore streaming fall back transparently.
+- **`OPENAI_CHAT_TEMPLATE_KWARGS`** — the lever for per-engine behavior (thinking on/off, JSON mode, etc.) that is a chat-template concern rather than a generic API field.
 
 ---
 
@@ -262,8 +262,9 @@ Because the translation is endpoint-agnostic, the exact same session works again
 | `connection refused` | Wrong port, or server not running | Confirm the port (llama.cpp `8080`, vLLM `8000`, SGLang `30000`) and that the server is up. |
 | `404` | Extra `/v1` in the URL, or wrong path | Set the origin only — see [The one gotcha](#the-one-gotcha-openai_base_url-is-an-origin-not-a-path). |
 | Server does not call tools (vLLM) | Tool calling not enabled | Add `--enable-auto-tool-choice` **and** `--tool-call-parser`. |
-| Model name rejected | `MODEL` does not match the server | List names with `scorpiox-openai-models <url>` and use one of `models[].id`. |
+| Model name rejected | `MODEL` does not match the server | List names with `/models` or `scorpiox-openai-models <url>` and use one of `models[].id`. |
 | No thinking / reasoning | Engine not told to think | Set `OPENAI_CHAT_TEMPLATE_KWARGS` (and optionally `OPENAI_REASONING_EFFORT`). |
+| Prompt rejected as too large (llama.cpp) | Context smaller than the conversation | SCORPIOX CODE learns the cap and compacts automatically; size `--ctx-size` to the model if it keeps recurring. |
 
 ---
 

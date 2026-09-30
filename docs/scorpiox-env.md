@@ -1,203 +1,189 @@
 # Configuration and Profiles in SCORPIOX CODE
 
-SCORPIOX CODE has a lot of knobs: which provider it talks to, which model, how hard it thinks, which tools are on, where it starts up, which credentials it uses. If every one of those had to live in a single place you would rewrite the whole file to change one thing — and two machines, or two accounts, or two projects could never share the same setup. **The configuration cascade** and **profiles** solve that: a small, predictable set of files that layer on top of each other, plus named bundles of overrides you can flip on and off with one command.
+Every setting SCORPIOX CODE makes — which provider it talks to, which model it defaults to, where it writes logs, whether tools are on — comes from a small, flat set of `KEY=VALUE` pairs. There is no binary blob, no JSON schema you have to validate, no daemon to keep in sync. You edit a text file, and the next session picks it up.
 
-This page is the map. It explains exactly which file wins when they disagree, where each one lives, what a profile is, and — the part people trip over most — the difference between **`/use`** (a temporary switch that lasts one session) and **`/profile`** (a saved switch that sticks around).
+The hard part is never a single file. The hard part is *several* files, in *several* places, each one trying to say the same thing. So SCORPIOX CODE loads its settings through a **configuration cascade**: a fixed list of locations, read in order, where each one that is present is allowed to override the ones below it. On top of that, **profiles** let you bundle a whole set of overrides into a named file and flip between bundles without touching any base config.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
-> **The whole idea in one line:** settings are layered from most-generic to most-specific, the most-specific wins, and a *profile* is a named file of overrides you activate at runtime — with `/use` to try it for this session only and `/profile` to make it permanent.
-
----
-
-## What the cascade is
-
-Instead of one configuration file, SCORPIOX CODE reads several, in a fixed order, and lets later ones override earlier ones for any key they define. That set of files, from the one with the least authority to the one with the most, is the **cascade**.
-
-Think of it as "defaults at the bottom, your machine in the middle, your project on top, and the environment you launched from at the very top." Each layer only needs to set the keys it cares about. Anything it leaves blank is inherited unchanged from the layers below it.
-
-### The tiers, bottom to top
-
-| Tier | Where it lives | Who it's for |
-|------|----------------|-------------|
-| **Defaults** | Built in | The safe out-of-the-box values. You never edit these. |
-| **Global** | `scorpiox-env.txt` next to the installed binary | Machine-wide install defaults. |
-| **User** | `~/.claude/scorpiox-env.txt` | Your personal settings on this machine, across all projects. |
-| **Project** | `.claude/scorpiox-env.txt` or `.scorpiox/scorpiox-env.txt` in the working directory | This repository. Check it into git so the team shares it. |
-| **Profile** | `scorpiox-env/<name>.txt` (see below) | A named bundle of overrides you activate on demand. |
-| **OS environment** | Variables in the shell that launched it | The strongest override of all — set a variable and it beats every file. |
-
-Two things about this ordering matter in practice:
-
-- **Only the keys a file defines are changed.** A project file that sets `MODEL` and `PROVIDER` leaves everything else — thinking budget, tools, streaming — inherited from your user file and the defaults. You are not rewriting a config, you are *narrowing* it.
-- **The environment beats every file.** If `MODEL` is set as a real OS environment variable, that value wins over `MODEL` in any `scorpiox-env.txt`. This is how you do a one-off launch without touching a single file:
-
-  ```bash
-  MODEL=sonnet sx          # one-off: this launch uses sonnet, no file touched
-  ```
-
-### Which project file wins?
-
-The project tier has two home directories. If a project ships both, the traditional one wins:
-
-1. `.claude/scorpiox-env.txt` — git-friendly, sits next to other agent config.
-2. `.scorpiox/scorpiox-env.txt` — the classic location. **Overrides `.claude/` if both are present.**
-
-You only ever need one. Pick `.claude/` if your repo already uses that layout, otherwise `.scorpiox/`.
+> **The whole idea in one line:** SCORPIOX CODE reads your settings from a stack of known locations in a fixed order, lets the highest one win for any given key, and lets you swap named "profiles" — self-contained override bundles — between them, either for the whole machine and every session, or for just the session in front of you.
 
 ---
 
-## What a profile is
+## The configuration file
 
-A **profile** is a single text file that sets a handful of keys — the keys that differ for a particular provider, account, or project — and loads as the highest *file* tier when it is active. Everything the profile does not set is inherited from the cascade below it, exactly as before.
+The unit of configuration is a single-line `KEY=VALUE` pair in a plain text file named `scorpiox-env.txt`:
 
-That last point is what makes profiles cheap to maintain. A "work" profile does not contain your whole configuration; it contains only the things that are different at work. Flip the profile off and you are back on your baseline.
+```ini
+# Provider + model
+PROVIDER=claude_code
+MODEL=sonnet
 
-### Where profiles live, and how they shadow
+# Turn tool use on or off (1 / 0)
+TOOLS=1
 
-Profiles live in a `scorpiox-env/` folder *next to* the configuration files, at each tier:
+# Where the agent starts when a session begins
+STARTUP_DIR=~/dev
 
-- **Global** — `scorpiox-env/` next to the installed binary.
-- **User** — `~/.claude/scorpiox-env/`
-- **Project** — `.scorpiox/scorpiox-env/` in the working directory.
-
-Each profile is one file named after the profile, for example `~/.claude/scorpiox-env/work.txt`. When you activate a profile by name, SCORPIOX CODE looks for that file and applies it.
-
-If the same profile name exists at more than one tier, the **whole file** shadows the lower tier — it is not merged line by line. Project beats user beats global. So a project can ship a `work.txt` that completely replaces your personal `work.txt` for that repository, without touching your home directory.
-
-A minimal profile, for a second Copilot account, looks like this:
-
-```
-# ~/.claude/scorpiox-env/copilot-work.txt
-PROVIDER=copilot
-COPILOT_TOKEN_SOURCE=local
-COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/work.json
-MODEL=claude-sonnet-5
+# Logging
+LOG_DIR=.scorpiox/logs
 ```
 
-Four keys. Nothing else. When active, those four override the cascade; the rest is untouched.
+That is the whole syntax. One `KEY=VALUE` per line, `#` starts a comment, blank lines are ignored. No quoting required for typical values, no sections, no escaping ceremony. If you already have a `scorpiox-env.txt` shipped with your install, that file is your reference for every key that exists — it is annotated and covers the full surface, from provider and model to proxy endpoints and timeouts.
 
 ---
 
-## `/use` vs `/profile`: the switch that matters
+## The cascade: where settings are read from, in order
 
-This is the one distinction that saves people real confusion, so it gets its own section. Both commands activate a profile **immediately, in the running session, with no restart** — they reload the provider and the model on the spot. The only difference is **how long the switch lasts**.
+SCORPIOX CODE does not read one file. It walks a stack of five tiers, from the most built-in to the most specific, and for any given key the **highest tier that sets it wins**. Think of it as a set of sheets stacked on a table: the top sheet's value is what you see, and if the top sheet leaves a key blank, the value shows through from the sheet below it.
 
-| | **`/profile <name>`** | **`/use <name>`** |
+From lowest to highest priority:
+
+| Tier | Where it lives | What it is for |
+|------|----------------|----------------|
+| 1 (lowest) | Built into the binary | Sensible out-of-the-box defaults. You never edit this. |
+| 2 | `scorpiox-env.txt` next to the installed binaries | **Global install config.** One file that tunes this install for everyone on the machine. |
+| 3 | `~/.claude/scorpiox-env.txt` | **User config.** Your personal defaults, shared across all projects on this account. |
+| 4 | `.claude/scorpiox-env.txt` or `.scorpiox/scorpiox-env.txt` in your working directory | **Project config.** Committed to the repo so a whole team gets the same behavior in that project. |
+| 5 (highest) | `scorpiox-env/<name>.txt` for the active profile | **Profile overlay.** A named bundle of overrides applied last. |
+
+A few rules that fall out of this table:
+
+- **Highest tier wins, key by key.** If your project file sets `MODEL=opus` and your user file sets `MODEL=sonnet`, a session started in that project runs on `opus`. Any key the project file does not mention still falls through to your user value. You are not forced to repeat everything in every layer.
+- **Within the project tier, `.scorpiox/` beats `.claude/`.** Both locations are read; if a project ships a `scorpiox-env.txt` in *both* `.claude/` and `.scorpiox/`, the `.scorpiox/` copy is the one that lands on top. `.scorpiox/` is the traditional SCORPIOX CODE home, `.claude/` is there so a project file can coexist with the files other tools already read.
+- **The working directory decides which project file applies.** SCORPIOX CODE looks in the directory you started the session from. If you start from a subdirectory, it is that subdirectory's `.claude/` and `.scorpiox/` that are consulted, not the repo root's.
+
+### The one thing above everything: real environment variables
+
+There is a layer even above tier 5. If a key is set as a genuine **OS environment variable** in the shell that launches SCORPIOX CODE, that value wins over every file in the cascade, profile included.
+
+```bash
+MODEL=haiku ./scorpiox   # this MODEL beats every scorpiox-env.txt and every profile
+```
+
+This is the escape hatch, not the everyday path. It is how CI, containers, and wrapper scripts inject a one-off override without writing a file, and how a temporary `ACTIVE_PROFILE` switch works under the hood (see below). For day-to-day configuration you will almost always want to edit a file so the setting is durable and visible, and reserve environment variables for the moment you need to override a file without changing it.
+
+---
+
+## Profiles: named bundles of overrides
+
+A **profile** is just a `scorpiox-env.txt` with a name. Instead of scattering `PROVIDER=...` and `MODEL=...` across your base files, you collect the things that change together into one file in a `scorpiox-env/` directory:
+
+```ini
+# .scorpiox/scorpiox-env/fast.txt
+# A fast, cheap, local-flavored profile
+PROVIDER=codex
+MODEL=haiku
+TOOLS=1
+```
+
+When that profile is active, its values are applied as the **topmost overlay** on the cascade. It does not replace your base config — it sits on top of it. Anything the profile file does not mention still comes from your project, user, and global files underneath. A profile is a *delta*, not a snapshot.
+
+### Where profiles live, and which one wins
+
+Profiles are looked up in the same per-tier locations, and — exactly like the base files — the **highest tier wins**. For a profile named `fast`, SCORPIOX CODE checks, from top down, and stops at the first match:
+
+| Tier | Profile location |
+|------|------------------|
+| Project | `.scorpiox/scorpiox-env/<name>.txt` |
+| User | `~/.claude/scorpiox-env/<name>.txt` |
+| Global | `scorpiox-env/<name>.txt` next to the installed binaries |
+
+So a `fast.txt` you commit into a repo's `.scorpiox/scorpiox-env/` shadows any same-named `fast.txt` in your user or global profile folders, for sessions started in that project. That is how a team ships a project-specific profile while letting people keep their own personal ones elsewhere. Profile names are short, printable, and must not contain spaces, slashes, or `..` — keep them boring and greppable.
+
+### How a profile is selected
+
+The key that names the active profile is `ACTIVE_PROFILE`. Setting it points the cascade at the matching `scorpiox-env/<name>.txt`; leaving it empty means "no profile, run on the base cascade alone." You set it in a file (it persists), or you set it for the session only (it does not) — which is exactly the difference between `/profile` and `/use`.
+
+---
+
+## `/profile` vs `/use`: the one thing people get wrong
+
+Both commands switch the active profile, and both do it **live** — they reload the configuration and the provider in place, no restart. The difference is one word and it is the whole point: **does the switch survive this session?**
+
+| | `/profile` | `/use` |
 |---|---|---|
-| **Persists?** | **Yes** — saved to your user config | **No** — held in memory only |
-| **Survives a restart?** | Yes — re-applies next launch | No — gone when the session ends |
-| **Writes a file?** | Yes, sets the active profile in `~/.claude/scorpiox-env.txt` | No file is written |
-| **Best for** | "I'm working on this account / project for a while" | "Let me quickly try this profile, then go back" |
-| **Deactivate** | `/profile off` | `/use off` |
-| **No argument** | Opens the profile picker (or lists them) | Lists available profiles |
+| Persists | Yes — saved | No — session only |
+| Writes to disk | Yes, to your user config | No |
+| Survives a restart / new session | Yes | No |
+| Reverts on its own | No — until you change it back | Yes — when the session ends |
+| Typical use | "I'm working on this stack this week." | "Let me try this model for a bit." |
 
-The practical rule: **use `/use` to experiment, `/profile` to commit.**
+**`/profile <name>` is the saved switch.** It writes `ACTIVE_PROFILE=<name>` into your user-tier config and applies it immediately. Every session from now on starts with that profile active until you change it. It is the durable choice: "this is how I want SCORPIOX CODE to behave."
+
+**`/use <name>` is the temporary switch.** It sets `ACTIVE_PROFILE` for the current session only and writes nothing. The switch is live for everything you do this session, then it is gone. When the session ends, the next one starts from whatever your saved profile is. It is the throwaway choice: "let me poke at this for a few minutes."
+
+Both commands share the same controls:
+
+- **No argument** lists the available profiles and the one that is currently active. `/profile` with no argument will, where a profile picker is available, open it instead.
+- **`off`** deactivates the profile and drops back to the plain base cascade. `/profile off` saves that; `/use off` does it for this session only.
+- **Unknown name** is rejected with a hint to run the no-argument form and list what exists.
+
+When either command takes effect, SCORPIOX CODE confirms the live result in the chat so you can see exactly what you are now running, for example:
 
 ```
-/use work              # try the work account for this session only
-/profile work          # make work the saved, default profile from now on
-/profile off           # turn the saved profile off
+Profile 'fast' active: haiku · codex · tools:on
 ```
 
-Both switches are **revert-on-fail**: if activating the profile breaks the provider (a bad endpoint, a dead credential), SCORPIOX CODE rolls back to the profile you had before and tells you, instead of leaving you in a broken state.
+That line is the model, the provider, and the tool switch — the three things a profile change is usually there to move. If the reload fails (for instance the new provider cannot start), the switch is **reverted** and you get a clear error rather than a half-applied configuration. A profile may also carry a `STARTUP_DIR`; on a successful switch SCORPIOX CODE moves to that directory, and a bad start directory is skipped without rolling back the profile itself.
 
-A note on the mechanism under the hood: a profile is selected by an `ACTIVE_PROFILE` key. `/profile` writes that key into your **user** tier so it survives; `/use` sets it only for the current process, which is why it disappears. You can also point at a profile from outside without any command at all:
+### A concrete pattern
 
+```text
+# You commit a fast, cheap profile to the project:
+#   .scorpiox/scorpiox-env/fast.txt
+
+> /use fast
+Profile 'fast' active: haiku · codex · tools:on
+> # ... run a few quick, cheap experiments ...
+> /use off
+No profile active.   (back to your saved default, this session only)
+
+> /profile fast
+Profile 'fast' active: haiku · codex · tools:on
+> # saved — every future session starts here until you change it
 ```
-ACTIVE_PROFILE=work sx     # launch with 'work' already active
-```
 
-An OS environment variable is the strongest override, so this beats whatever is saved in a file — handy for scripts and one-off runs.
-
-### The profile picker
-
-Run `/profile` with no argument and SCORPIOX CODE opens an interactive picker (a small terminal UI, not a chat message). It lists every profile it can see across all tiers, shows a badge for the tier each one came from, and previews the keys that profile overrides so you can see exactly what it will change before you press Enter. The first entry is always **off**. If the picker component is not installed for your build, the command falls back to printing the list in the chat instead.
+The discipline is: **`/use` to try, `/profile` to commit.** If you find yourself re-running the same `/use` in every session, that is SCORPIOX CODE telling you the profile should actually be saved.
 
 ---
 
-## Inspecting the resolved configuration
+## Putting it together: a key's full journey
 
-When several tiers are in play, you sometimes want to see what actually won for a given key. The `scorpiox-config` tool answers that:
+Follow `MODEL` from a session started inside a project, with a `fast` profile active, and `MODEL` also exported in the shell:
 
-```bash
-scorpiox-config                 # open the interactive configuration editor
-scorpiox-config --verbose       # print key values and which tier each one came from
-scorpiox-config --dump          # dump every resolved key
-scorpiox-config --get MODEL     # print a single resolved key
-```
+1. **Built-in default** supplies a baseline `MODEL`.
+2. **Global** install file may override it.
+3. **User** `~/.claude/scorpiox-env.txt` may override that.
+4. **Project** file may override that.
+5. **The active profile** (`scorpiox-env/fast.txt`) overrides that, if it sets `MODEL`.
+6. **The OS environment variable** `MODEL` overrides all of the above.
 
-`--verbose` is the one to reach for: it shows the resolved `PROVIDER`, `MODEL`, and active profile together with their source tier, so you can confirm you are pointed where you think you are before a long run.
-
----
-
-## One-off overrides without touching a file
-
-For a single launch you can override a key straight from the command line with `-e`. It behaves exactly like setting the key in the cascade but only lives for that process:
-
-```bash
-sx -e PROVIDER=copilot -e MODEL=claude-sonnet-5   # this launch only
-```
-
-`-e` is repeatable. Combine it with an OS variable and either will beat the files — they are simply the top of the cascade, applied to the running session.
+The value that survives is the one from the highest tier that actually set the key. Change any layer, or activate a different profile, and the winning value changes predictably — no other key is touched.
 
 ---
 
-## A profile can also change where you start
+## Gotchas
 
-Profiles are not limited to provider and model. A profile can set the startup working directory, so each profile can drop you into the folder that goes with it. That same directory is re-applied on every profile switch, so `/profile` and `/use` can move you between projects as well as between accounts. The `--cwd` launch flag always wins over the configured directory when you need to override it for a single run.
-
----
-
-## A worked example
-
-You have a personal account and a work account, both on the Copilot provider, and a side project that runs on a local OpenAI-compatible server. Three profiles, three files:
-
-```
-# ~/.claude/scorpiox-env/personal.txt
-PROVIDER=copilot
-COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/personal.json
-MODEL=claude-sonnet-5
-
-# ~/.claude/scorpiox-env/work.txt
-PROVIDER=copilot
-COPILOT_CREDENTIALS_FILE=~/.copilot/accounts/work.json
-MODEL=claude-sonnet-5
-STARTUP_DIR=~/work
-
-# ~/projects/side/.scorpiox/scorpiox-env/local.txt
-PROVIDER=openai
-OPENAI_BASE_URL=http://localhost:8080/v1
-MODEL=local-model
-```
-
-Your day:
-
-```
-/profile personal          # saved — this is now your default
-cd ~/projects/side
-/use local                 # try the local server just for this session
-# ...build, test...
-/use off                   # back to 'personal', nothing on disk changed
-```
-
-When you get home the next day and run SCORPIOX CODE, `personal` is still active because it was saved. The `local` profile only ever existed for that one session. That is the whole point: **temporary switches leave no trace, saved ones do.**
+- **Highest wins, per key, not per file.** A profile does not disable the layers beneath it. It only overrides the keys it names. If a profile sets `PROVIDER` but not `MODEL`, you get the profile's provider with the base cascade's model. That is the feature, and it is the surprise.
+- **The working directory selects the project tier.** Starting a session from a subfolder reads that subfolder's files. If your project config lives at the repo root and you start from `src/`, the root config is invisible to that session. Start from the root, or place the file where you start.
+- **`/use` is invisible to the next session.** It is the most common "why did my setting disappear" — the switch was session-scoped by design. If a change must last, it is `/profile`, or edit a file.
+- **Environment variables beat the profile too.** A stray `MODEL` exported in a shell profile will silently outrank a profile you think is controlling it. When a value "won't stick," check the environment before blaming the files.
+- **A profile name must resolve somewhere.** `ACTIVE_PROFILE=fast` only means something if a `scorpiox-env/fast.txt` actually exists in one of the profile locations. A dangling name is a no-op with a warning, not an error.
+- **Switches revert on failure.** Both `/profile` and `/use` roll back if the new provider cannot start. You will never be left half-switched.
 
 ---
 
 ## The bottom line
 
-SCORPIOX CODE configuration is a stack, not a file. Defaults at the bottom, your machine in the middle, your project on top, and the environment you launched from above all of them — each layer only overrides the keys it names. A **profile** is a named file of overrides that loads as the top *file* tier when you activate it, and it only changes what it explicitly sets.
+SCORPIOX CODE's configuration is a flat `KEY=VALUE` file read through a five-tier cascade, where the highest tier that sets a key wins, and real environment variables sit above even that. Profiles are the same files with names: a self-contained overlay you point at with `ACTIVE_PROFILE`, applied on top of everything else and resolved the same highest-tier-wins way. And the two switches are deliberately split — **`/use` to try a profile for this session, `/profile` to save it for all of them.**
 
-And the switch you will use every day: **`/use <name>`** to try a profile for this session and leave no trace, **`/profile <name>`** to make it permanent. Both apply instantly, and both roll back automatically if the new profile does not come up.
+Keep your durable, shared defaults in the base files, keep your frequently-changed bundles in profiles, and use the temporary switch to experiment without ever touching what is saved.
 
 ---
 
 ## Related
 
-- [Using GitHub Copilot CLI Subscription in SCORPIOX CODE](copilot-provider.md)
-- [Using Claude Code CLI Subscription in SCORPIOX CODE](claude-code-provider.md)
-- [Using OpenAI Codex & ChatGPT Subscription in SCORPIOX CODE](codex-provider.md)
-- [Using the OpenAI Provider](openai-provider.md)
 - [Project Instructions in SCORPIOX CODE: CLAUDE.md and AGENTS.md](project-instructions.md)
-- [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md)
+- [Deterministic File Editing & Developer Autonomy](file-editing.md)

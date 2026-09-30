@@ -4,7 +4,7 @@ You have a **Claude Code CLI** subscription (a Claude Pro or Max plan, or a Clau
 
 This page walks through the **OAuth session login**, how the token is stored and kept fresh, how to juggle multiple accounts with profiles (`/profile` and `/use`), how to drive a login without a TTY (**machine mode**), and how the Claude Code subscription differs from standard Anthropic API-key usage.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
 ---
 

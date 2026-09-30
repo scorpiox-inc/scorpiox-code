@@ -1,181 +1,159 @@
 # Skills in SCORPIOX CODE: On-Demand Architecture vs Other Harnesses
 
-You want the agent to know how to do a specific thing well — release a build, run the project's test matrix, follow a code-review checklist, format a changelog — without pasting a wall of instructions into every prompt or bloating your project instructions file. That is what a **skill** is for.
+You want the agent to know how to do a specific job — deploy, release, review a PR, call a particular API — without that job's instructions sitting in the system prompt every single turn, burning tokens on work it is not doing.
 
-A skill in SCORPIOX CODE is a small folder on disk that holds one job's worth of instructions. The agent does not read all of them up front. It is told *that they exist and what each one is for*, and it pulls one into context only when the task needs it. That "tell it the menu, load on request" split is the whole design, and it is the part that separates SCORPIOX CODE from most other agent harnesses.
+SCORPIOX CODE treats skills as **on-demand knowledge**: only a skill's *name and description* are always visible to the agent. The full `SKILL.md` body is loaded into context only in the moment the agent decides to use it. That one decision — a small always-present index instead of a large always-present blob — is what the rest of this page is about, and how it compares with the other agent harnesses you will hear about.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
-> **The whole idea in one line:** a skill is a folder with a `SKILL.md` in it. SCORPIOX CODE advertises the skills it can see to the model and loads a skill's body only when it is asked — so your context stays lean, your instructions stay portable, and adding a capability is a copy-paste, not a config edit.
+> **The whole idea in one line:** a skill is a folder with a `SKILL.md` in it. The agent always sees the folder's *name* and *one-line description*. It reads the whole document only when it chooses to load it. No config file, no registration step, no manifest — the folder is the registration, and the description is the trigger.
 
 ---
 
 ## What a skill is
 
-A skill is a directory containing a single `SKILL.md` file:
-
-```
-.claude/skills/
-└── release-single-platform/
-    └── SKILL.md
-```
-
-`SKILL.md` has a short YAML frontmatter block followed by a markdown body. The frontmatter is the *ad* — what the model sees in the listing. The body is the *manual* — what the model reads only after it decides the skill is relevant.
+A skill is a directory containing a `SKILL.md` file. The file has a short YAML frontmatter and a markdown body:
 
 ```markdown
 ---
-name: release-single-platform
-description: Build and ship a single-platform release. Use when the user asks to release one target.
+name: deploy
+description: Ship the current branch to staging. Use when the user says "deploy".
 argument-hint: [target]
 ---
 
+One-line summary of what this skill does.
+
 ## Rules
-1. Never tag before the test matrix is green.
-2. Always record the commit hash in the release notes.
+
+1. **Rule one** — the most important constraint.
+2. **Rule two** — the second.
 
 ## Steps
-1. Run the build for `$ARGUMENTS`.
-2. ...
+
+Exact commands, templates, and examples.
 ```
 
-Three frontmatter fields matter:
-
-| Field | Required | Purpose |
-|-------|----------|---------|
-| `name` | Yes | The skill's identifier (kebab-case). Matches the folder name. |
-| `description` | Yes | One line on *when* to use it. This is what the model reads to decide whether to load the body.
+| Frontmatter field | Required | Purpose |
+|-------------------|----------|---------|
+| `name` | Yes | The skill's identifier (kebab-case). It becomes the command name. |
+| `description` | Yes | One line on *when* to use it. This is what the agent reads to decide. Keep it specific. |
 | `argument-hint` | No | A hint at what `$ARGUMENTS` will contain when the skill is invoked. |
 
-The body is plain markdown. You write exact commands, numbered rules, templates, examples — anything that makes the task reliable. `$ARGUMENTS` in the body is replaced with whatever arguments were passed at invocation, so one skill can serve many inputs.
+The body is where the real instructions live. When a skill is loaded, `$ARGUMENTS` in the body is replaced with whatever argument the agent (or you) passed in.
 
-A skill is deliberately small. One skill, one job. If you are writing two unrelated things, that is two skills.
+A skill is not limited to a document. A skill can also be an **executable script** (`.sh`, `.ps1`, …). When the agent invokes a script skill, SCORPIOX CODE runs it and feeds the exit code and output back to the agent — the same load-and-use contract, but the "content" is the script's result instead of static text.
 
 ---
 
-## Where skills live, and who wins
+## Where skills live (and who wins)
 
-SCORPIOX CODE looks for skills in a few places, from most specific to least. When two skills share a name, the higher-priority location wins — the lower one is shadowed, not merged.
+Skills are discovered from a cascade of directories. Each skill is identified by its **folder name**, and higher-priority locations override lower-priority ones with the same name:
 
 | Location | Scope | Priority |
 |----------|-------|----------|
-| `./.claude/skills/` | Project-local | Highest |
-| `~/.claude/skills/` | User-global | Below project |
-| Paths in the `ADDITIONAL_SKILLS` setting | Shared / extra repos | Below user |
-| Built-in skills (shipped in the binary) | Always available | Lowest |
+| `./.claude/skills/<name>/SKILL.md` | Project | Highest |
+| `~/.claude/skills/<name>/SKILL.md` | User | Middle |
+| Built-in skills (shipped inside the product) | Global | Lowest |
 
-A few points worth knowing:
+A few things worth noticing about this table:
 
-- **Project beats user, user beats the rest.** Drop a `release-single-platform/` skill in the project and it silently overrides a same-named one in your home directory. That is how a repo pins its own workflow without touching your personal setup.
-- **The folder name is the skill's identity.** The `name` field describes it; the directory holds it. To rename a skill, make a new one and delete the old — do not move the directory under a running assumption of an old name.
-- **Built-ins have no file on disk.** A few skills (such as the ones that teach the agent how to create and edit skills) ship inside the binary so they work even in an empty directory. You can override them the same way: write your own `SKILL.md` with the same name in a project or user skills folder and yours takes precedence.
-- **`ADDITIONAL_SKILLS` points at more folders.** Set it to a comma-separated list of local paths and SCORPIOX CODE scans those too. This is how a team shares a skills repository across machines — the path is the registration step, and `/skills-update` pulls those repos from git so the shared set stays current.
-- **Default to project-local.** Put a skill in `./.claude/skills/` unless you genuinely want it to follow you across every project. Project-local skills are versioned with the repo, reviewed in pull requests, and disappear with the repo.
+- **Project beats user beats built-in.** Put a skill in your repo and it shadows any same-named skill in your home directory or in the product itself. You can override a built-in by simply naming your own folder the same thing.
+- **The product ships built-in skills.** They are embedded in the binary so they work with zero setup — things like `create-skill`, `edit-skill`, `create-command`, `edit-command`, and platform-specific helpers (preferred file-tool conventions, a fast-clone procedure, etc.). Because they are the *lowest* priority, you never have to think about them; drop your own and yours win.
+- **It reads the open standard folders.** SCORPIOX CODE looks in `.claude/skills/` (and, as a fallback, `.agents/skills/`) rather than inventing a private path. Skills you already maintain for another tool that follows the same `SKILL.md` convention are picked up as-is.
 
-There is also a fallback folder, `.agents/skills/`, used only when a level has no `.claude/skills/` directory at all. It exists for cross-tool portability; it is never merged with `.claude/skills/`, and `.claude` always wins.
+There is also an **additional skills** mechanism: you can point the agent at extra local skill directories, and `/skills-update` performs a git pull over any of them that are git repositories. That is how a team keeps a shared, version-controlled skills library in sync across machines without anyone copying folders around.
 
----
-
-## The on-demand model: how it actually loads
-
-This is where SCORPIOX CODE differs from a naive "dump everything into the system prompt" approach. The agent never sees every skill body at once. It sees a *listing* — names and descriptions — and it loads a body on demand.
-
-The mechanism is two tools the agent can call:
-
-- **Search** — a grep-powered search over the skills the agent can see. It matches against skill names, descriptions, and file content, with regex and case-insensitive support. An empty pattern lists everything. This is discovery: "what skills do I have that touch releases?"
-- **Invoke** — load a skill by name. It returns the skill's full body (with `$ARGUMENTS` substituted) for the agent to follow as instructions or context.
-
-So a run looks like: the model reads the listing, notices a relevant skill, optionally searches to confirm the exact name, invokes it, and only then does that skill's body enter the conversation. A skill you do not use costs nothing in context. A twenty-skill project does not make the prompt twenty skills longer — it makes a short index a little longer.
-
-The listing itself is configurable, because a large team of skills can be as noisy as a giant system prompt:
-
-- You can include or exclude skills from the listing by name or glob pattern, and rank the listing so the most-used skills surface first.
-- Skills can be filtered in and out per environment without deleting them.
-- A skill that is *not listed* is still invocable and still searchable — listing controls visibility, not availability.
-
-This separation is the design intent: the listing is a prompt-caching and context-budget knob, while the on-disk skills remain the source of truth.
-
-One detail that earns its keep: the listing is built in a stable, deterministic order. The same set of skills always produces the same listing text, so the prompt does not churn on every reload. That keeps provider prompt caches effective — a reshuffled listing would invalidate the cache and burn tokens on every turn, so the order is part of the contract, not an accident.
+Custom commands live in the same model. A markdown command file creates a `/command` exactly like a skill, so "command" and "skill" are two faces of the same mechanism rather than two systems.
 
 ---
 
-## Required skills: making a skill non-optional
+## The on-demand model, precisely
 
-On-demand means the agent decides when to load. Sometimes you do not want a decision — you want a skill to *be* present for a class of work. That is what the required-skills mechanism is for.
+This is the part that matters, so it is worth stating plainly.
 
-You can declare a set of required skills in a small text file, and SCORPIOX CODE cascades them across four levels:
+At the start of the agent loop, SCORPIOX CODE does **not** paste every skill's body into the prompt. It builds a compact **index** — for each available skill, just its name and its description — and presents that index alongside the skill-loading tool. The full `SKILL.md` body is loaded only when the agent actually invokes the skill.
 
-| Level | File |
-|-------|------|
-| User | `~/.claude/required_skills.txt` |
-| Project (Claude) | `.claude/required_skills.txt` |
-| Project (Scorpiox) | `.scorpiox/required_skills.txt` |
-| Session | `.scorpiox/sessions/<id>/required_skills.txt` |
+Consequences, all of which fall out of that single rule:
 
-Each line is a skill name (comments and blanks are ignored). The cascade is the union of all four, so a project can require skills on top of what a user has required, and a session can add to both. The agent tracks, per session, which required skills it has already loaded.
+- **Token cost is flat, not proportional to the library.** Ten skills or two hundred skills: the always-present cost is a list of one-line descriptions, not a stack of documents. A 400-line reference procedure costs essentially nothing until it is needed.
+- **The description is the contract.** Because the description is the only thing the agent sees before loading, it is the trigger. A vague description means the agent will not reach for the skill; a specific one ("Use when the user asks to create a consistent release and changelog") does. This is why the frontmatter asks *when* to use it, not just *what* it is.
+- **Loading is a deliberate act.** The agent chooses to load. It can read the index, decide the task needs it, and pull the body in. That keeps irrelevant knowledge out of the window so it cannot crowd out the code you are actually working on.
 
-There are two ways to enforce it, and they differ in how pushy they are:
+There are two tools the agent uses for skills, and together they cover "find it" and "load it":
 
-- **Nudge.** Before the agent acts, SCORPIOX CODE checks whether any required skill is still missing. If so, it nudges the agent to load it. The agent loads the skill itself through the normal on-demand path.
-- **Force-inject.** With the force-inject option on, missing required skills are loaded for the agent directly and placed into context in one go, skipping the nudge-and-invoke round-trip entirely. This is the stronger guarantee: the skill is present, whether or not the agent would have remembered.
+| Tool | What it does |
+|------|--------------|
+| **InvokeSkill** | Loads a skill by name and returns its content (with `$ARGUMENTS` substituted). For a script skill, it runs the script and returns the result. |
+| **SearchSkills** | A grep-powered search over skill names, descriptions, and content. Returns matching names and descriptions. It is the discovery path when the always-visible index is not enough. |
 
-A skill that has been disabled for the session is treated as satisfied, so the enforcement loop never asks for something you explicitly turned off.
-
-The practical pattern: a repo that requires its release skill to always be in play writes one line in `.scorpiox/required_skills.txt` and turns on force-inject, and every session in that repo starts with the release procedure already loaded.
+`SearchSkills` is interesting because it is **grep-backed, not model-backed**: it matches literal text inside your skill files, so it finds the thing you actually wrote rather than guessing at what a skill might be about. It is engaged automatically when the visible index is partial (for example, when a list filter is in effect and some skills are hidden), and it can also be driven directly with an empty pattern to list everything.
 
 ---
 
-## Managing skills from the prompt
+## Controlling what the agent can see
 
-You control skills without leaving the terminal:
+The index is not all-or-nothing. You can shape it:
 
-- `/skills` — show the skills currently loaded, where each one came from, and what it is for. This is the "what do I actually have right now" view.
-- `/skills-update` — pull the git-backed skill repositories named in `ADDITIONAL_SKILLS` so a shared skills set stays up to date.
-- `/disable_skill <name>` — block a skill for the current session. It stays listed, but invoking it returns an error. Useful when a skill is present but not appropriate for the run.
-- `/enable_skill <name>` — re-enable a skill you disabled.
+| Control | Effect |
+|---------|--------|
+| List filters | Show only a subset of skills in the always-visible index. When the list is partial, `SearchSkills` is enabled automatically so the hidden ones stay discoverable. |
+| Per-skill disable (`/disable_skill`, `/enable_skill`) | A disabled skill stays listed (so the agent and the prompt stay cache-stable) but is refused when the agent tries to load it. It is a session-level kill switch, not a deletion. |
+| `/skills` | Shows the loaded skills and where they came from. |
+| `/skills-update` | Git-pulls the additional skill repositories. |
 
-Disabling is per-session and reversible. It does not touch the files, so the same skill behaves normally in the next session.
-
----
-
-## How this differs from other harnesses
-
-The short version: SCORPIOX CODE treats a skill as a *first-class, on-demand, filesystem-registered instruction unit* with an explicit discovery tool, an explicit load tool, a per-session enforcement loop, and a listing tuned for prompt-cache stability. Other harnesses reach for the same goal — "give the agent reusable, task-specific knowledge" — but they tend to do it through a different shape, and the shape has consequences.
-
-**Claude Code** is the closest relative, and it is worth being precise about the difference because the formats look similar. Claude Code's skills also live in folders with a `SKILL.md` and also rely on progressive disclosure: the model sees a name and description and reads the body when it judges the skill relevant. SCORPIOX CODE keeps that folder-and-frontmatter model but makes the skill *explicit machinery* rather than an emergent behavior. The skills are advertised through a dedicated listing, discovered with a dedicated grep-based search tool, and loaded through a dedicated invoke tool, so the agent is never guessing whether a skill exists or how to reach it. On top of that, SCORPIOX CODE adds the pieces Claude Code leaves to convention: a cascading required-skills loop with a nudge or a force-inject, per-session disable, a configurable and ranked listing, and a deterministic order chosen to keep prompt caches alive. Same family, more of the heavy lifting done for you.
-
-**OpenCode** reaches extensibility through a different axis entirely: it is built around *plugins* (code you register) and *agent* definitions (markdown persona/config files) rather than a searchable skill registry. You can give it reusable knowledge, but the unit is a plugin or an agent, not a small task-scoped `SKILL.md` the model pulls in on demand. There is no grep-across-skills discovery step and no per-session required-skill enforcement. The result is more powerful for code-level extensions and less granular for "just tell the agent how to do this one job."
-
-**Codex** leans on a monolithic `AGENTS.md` plus custom prompt files. Everything the agent should know tends to land in one big instructions file that is read as a block. That is simple, but it does not scale the way on-demand skills do: the file grows with every capability you add, and the whole thing is in context whether or not the current task needs it. SCORPIOX CODE's skills are the opposite trade — many small files, an index in context, bodies loaded only when used.
-
-**Pi** is intentionally minimal. Its extension surface is code-defined tools you write and register, not a markdown skill layer the model reads. You get fine-grained control over *tools*, but there is no convention for dropping a task instruction set into a folder and having the agent discover and load it without you writing tool code. Skills in SCORPIOX CODE are a layer above tools: plain instructions, no code, discovered by search, loaded on demand.
-
-**Hermes** similarly models its extensibility as plugins and configuration rather than an on-demand, searchable instruction registry. You wire capabilities in and they are available; you do not hand the agent a menu it can query and pull from at runtime.
-
-The pattern across all of them: most harnesses either (a) stuff knowledge into one always-present file, (b) require code-level plugins, or (c) rely on the model's general file-reading to find instructions. SCORPIOX CODE takes a fourth shape — a registry of small files, advertised by a tunable listing, found by a dedicated search tool, loaded by a dedicated invoke tool, and optionally enforced per session. That is what "on-demand" means here: the cost of a capability is paid only when the capability is used, and the registry itself is cheap enough to keep dozens of skills available at once.
+And there is a **hot reload**: the skill directories are watched, and adding, editing, or removing a `SKILL.md` is picked up without restarting the session. You edit a skill, the next turn sees it.
 
 ---
 
-## A skill, end to end
+## Required skills: a guarantee, not a hope
 
-1. Make a folder: `.claude/skills/release-single-platform/`.
-2. Write `SKILL.md` with `name`, `description`, and the steps. Use `$ARGUMENTS` where an input goes.
-3. That is the whole registration. It is now in the listing, searchable, and invocable.
-4. If the repo should always have it, add `release-single-platform` to `.scorpiox/required_skills.txt` and turn on force-inject if you want it loaded rather than nudged.
-5. To share it, put the folder in a git repo, point `ADDITIONAL_SKILLS` at the local clone, and `/skills-update` to refresh it.
+Most harnesses leave it to the model to remember to use a skill. SCORPIOX CODE can be stricter. A **required-skills** list (kept per user, per project, and per session in a cascade of small text files) names skills that *must* be in play for the work at hand.
 
-No manifest, no schema, no build step. The folder is the registration; the listing is the index; the load is on demand.
+When a session begins, the harness checks the required list against what has actually been loaded. If a required skill has not been loaded, it injects a nudge into the conversation asking the agent to load it, and it keeps checking as a safety net across turns. There is also a forced mode that injects the missing required skills' content directly into the context as a single message, skipping the nudge-and-wait round-trip entirely, and a system-prompt mode that appends required skills' content verbatim to the system prompt.
+
+In practice this is how you encode "for this repo, always follow the release checklist" or "for this customer's project, always use their deploy procedure" and have it *enforced* rather than merely suggested.
 
 ---
 
-## The bottom line
+## How this compares to other harnesses
 
-A skill in SCORPIOX CODE is a folder with a `SKILL.md` in it: a short frontmatter that advertises the skill and a markdown body that the model reads only when it is asked. The model sees a tunable, deterministic listing of what is available, searches with a grep-based tool, and loads a body with an invoke tool — so context stays lean and every capability costs nothing until it is used. A cascading required-skills loop makes a skill non-optional when you need it to be, and per-session disable, git-backed shared repos, and a stable listing order round it out. Add a skill by dropping a file in a folder; remove one by deleting it; keep the whole thing portable, diffable, and versioned like any other file in the repo.
+The short version: the industry has largely converged on the same core idea — **progressive disclosure** — and SCORPIOX CODE is squarely in that camp, not outside it. The differences are in the details: where skills live, how they are discovered, and what extra guarantees the harness adds on top. Here is the honest comparison.
+
+| Harness | On-demand? | Where skills live | Discovery | Notable extras |
+|---------|-----------|-------------------|-----------|----------------|
+| **SCORPIOX CODE** | Yes — name + description only in prompt; body loads on invoke | `.claude/skills` (project/user), built-ins in the binary, additional git-backed dirs | Always-visible index + grep-powered `SearchSkills` (auto-enabled when the list is partial) | Built-in skill layer, required-skills nudge/force-inject guarantee, document-or-script skills, hot reload, per-skill runtime disable |
+| **OpenCode** | Yes — native `skill` tool lists skills; body loads when the agent calls it | `.opencode/skills`, plus `.claude/skills` and `.agents/skills` (project and global) | Skills listed in the `skill` tool's description; the agent loads by calling the tool | Pattern-based permissions (`allow` / `deny` / `ask`) over which skills an agent may use |
+| **Claude Code** | Yes — "a skill's body loads only when it's used" | `.claude/skills`, `.claude/commands` (merged into skills) | Description is always available; the agent loads when relevant, or you run `/skill-name` | Follows the Agent Skills open standard; bundled skills; subagent execution and dynamic context injection as extensions |
+| **OpenAI Codex** | Yes — "progressive disclosure" | A skill is a directory with a `SKILL.md` plus optional scripts/references | Name + description shown first; full `SKILL.md` read on selection. The initial list is budget-capped (roughly 2% of the context window, or 8,000 characters) so large libraries do not crowd the prompt | Skills packaged as plugins and distributed through a shared plugin directory (ChatGPT and Codex) |
+| **Pi** | Partially — explicit and file-driven | `.pi/skills/*.md` (plus `.pi/prompts`) | Skills are referenced by explicit links from the agent's instruction file (e.g. `AGENTS.md`) rather than an always-on index | An extension system; skills are loaded when the instruction file points at them |
+| **Hermes** | Yes — "on-demand knowledge documents" with progressive disclosure | `~/.hermes/skills/` (primary), plus external skill directories | Name + description shown; full document loaded on demand | A **learning loop**: the agent can create skills from experience and improve them during use; a public Skills Hub for install-and-browse |
+
+A few observations from that table, stated plainly:
+
+- **You are not choosing a fundamentally new paradigm by picking SCORPIOX CODE.** OpenCode, Claude Code, and Codex all do progressive disclosure, and most of them follow the same open `SKILL.md` convention. The "load the body only when needed" idea is now the standard, not a differentiator.
+- **What is genuinely different is the surrounding machinery.** SCORPIOX CODE ships a built-in skill layer you can override by name, a grep-based `SearchSkills` that searches what you actually wrote, a required-skills mechanism that *enforces* that certain skills are loaded (with a force-inject option), a git-backed additional-skills path, document-or-script skills, and hot reload. None of those are in the core open standard; they are what the harness adds on top.
+- **Where the others lean differently:** Codex is the most aggressive about *budgeting* the always-visible list (a hard percentage of the context window). OpenCode is the most explicit about *permissioning* which skills an agent may touch. Hermes is the only one in this set that *mutates its own skills over time* — it creates them from experience and improves them in use. Pi is the most *explicit*: its skills are linked from the agent's instruction file rather than surfaced through a standing index.
+
+If your priority is a large, shared, team-maintained skills library that the agent can reliably find and is guaranteed to honor for a given project, the combination of the built-in + project + additional cascade, `SearchSkills`, and required-skills enforcement is the part of SCORPIOX CODE you will feel. If your priority is cross-tool portability, the fact that it reads the standard `.claude/skills` / `.agents/skills` folders means the same skills move across harnesses with no rewriting.
+
+---
+
+## When to reach for a skill
+
+Use a skill when you keep pasting the same multi-step procedure, checklist, or set of constraints into a session. If a chunk of instructions has grown into a *procedure* rather than a *fact*, it belongs in a skill, not in the project instruction file. A skill is the right shape for:
+
+- **Repeated workflows** — deploy, release, review, migrate.
+- **Domain or platform constraints** — "always use these file-tool conventions on this platform," "always call this API this way."
+- **Encapsulated commands** — a named action with a body the agent can load on demand.
+
+It is *not* the right shape for a single fact, a one-off note, or anything the agent should see on every turn by default. For always-on project context, use the project instruction file; for deterministic side effects on lifecycle events, use the hook system; for recurring timed work, use scheduled callbacks. A skill is specifically the "large body of procedure that is only sometimes needed" case, and the on-demand model exists precisely so that case stays cheap.
 
 ---
 
 ## Related
 
-- [Event Hooks in SCORPIOX CODE: Folder-Based Automation Architecture](hooks-system.md)
-- [Long-Horizon Agent Tasks: Conversation Compaction and Filesystem Session Architecture](conversation-compaction.md)
-- [Deterministic File Editing & Developer Autonomy in SCORPIOX CODE](file-editing.md)
-- [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
+- [Project Instructions](project-instructions.md) — always-on project context, and when a fact belongs there instead of in a skill.
+- [Event Hooks in SCORPIOX CODE](hooks-system.md) — folder-based deterministic side effects on lifecycle events.
+- [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md) — recurring and timed work.
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md) — how the context window is managed as a session grows.
+- [Data Privacy and Zero Data Collection](data-privacy.md) — where your skills and sessions are (and are not) sent.

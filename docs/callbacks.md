@@ -4,7 +4,7 @@ You want SCORPIOX CODE to keep working after it finishes a turn — to check bac
 
 That single mechanism is what powers **auto-pilot** (the agent keeps itself going turn after turn), **polling** (check a status every N seconds until it changes), and **long-running work** (fire a follow-up a few seconds later so a background task can be picked up). A callback is not a background process or a webhook. It is a *message with a start time*, delivered to the same agent loop you are already talking to.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
 > **The whole idea in one line:** a callback schedules a message to be sent back to the agent after a delay, and the agent treats it exactly like a line you typed — so a short "keep going" note can loop the agent forward without any human input.
 

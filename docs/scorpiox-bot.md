@@ -1,204 +1,214 @@
-# Remote Agent Control & Fleet Management with SCORPIOX BOT
+# Remote Agent Control and Fleet Management with SCORPIOX BOT
 
-You have a SCORPIOX CODE agent running on a box three rooms away, on a build server, or on a machine you only get to by SSH. You want to do more than SSH in and hope the terminal is still where you left it: you want to **send it a prompt**, **watch its output live**, **see what it is doing right now**, and **manage a whole fleet of them at once** — from a browser or from a script, on any machine.
+Running an agent at your desk is one thing. Running a *fleet* of agents — across several machines, several projects, several people — and being able to see what each one is doing, type into any one of them, and kick off new work from anywhere, is a different product entirely. SCORPIOX BOT is that product: a thin, always-on layer that wraps your running SCORPIOX CODE sessions so you can drive them remotely, watch their output live, and manage the whole set of machines they run on.
 
-SCORPIOX BOT is the remote-control layer for SCORPIOX CODE. It gives every running agent a small, fast, always-on control surface: a **headless HTTP API** for automation and a **web dashboard** for humans, both speaking to the same sessions on the same machines.
+It is built from two deliberately small pieces. **`scorpiox-bot-api`** is a headless HTTP API — a set of tiny endpoints that read and write the session state SCORPIOX CODE already keeps on disk, with no changes to the agent itself. **`scorpiox-bot-web`** is a pure C web dashboard on top of that API: a single page for your whole fleet, a live chat view for each session, and a full edge-to-edge terminal. Because both halves are plain HTTP and plain C, the API is something you can script and point an AI at, and the web is something you open in a browser. Same data, two front doors.
 
-Docs for SCORPIOX CODE @ `2b0bffd`.
+Docs for SCORPIOX CODE @ `13253cf`.
 
-> **The whole idea in one line:** SCORPIOX BOT turns each SCORPIOX CODE session into something you can talk to, watch, and steer over the network — and it groups many of those machines into one fleet you manage from a single dashboard.
+> **The whole idea in one line:** SCORPIOX BOT turns every SCORPIOX CODE session into something you can list, stream, type into, and spawn from any browser or script — on the machine it runs on, or across a cluster of machines, with one dashboard and one set of REST calls.
 
 ---
 
-## What SCORPIOX BOT is
+## What it is (and what it is not)
 
-SCORPIOX BOT is two thin layers over the agent sessions that SCORPIOX CODE already writes to disk. Neither layer changes the agent itself.
+The single most important thing about SCORPIOX BOT is how little it changes. It does **not** fork SCORPIOX CODE, add an agent-in-the-middle, or proxy your model calls. Each running agent session already writes its own state — the conversation, the live terminal pane, the per-session event stream — to your filesystem under `.scorpiox/sessions/`. SCORPIOX BOT reads and writes *that* state through ordinary HTTP.
 
-| Layer | What it is | Who uses it |
-|-------|------------|-------------|
-| **Headless API** (`scorpiox-bot-api`) | A set of small HTTP routes: list sessions, send a message, stream the terminal, snapshot a screen, answer a question, manage callbacks. JSON in, JSON out. | Scripts, AI automation, mobile clients, your own tooling. |
-| **Web dashboard** (`scorpiox-bot-web`) | A single-page, dark-theme web UI: session grid, live chat view, multi-node selector, panes, per-node profiles, cron, providers. | Humans in a browser. |
+That means a few honest properties you should rely on:
 
-Both layers are **pure C** — compiled native executables, no runtime, no Python. Each HTTP route is its own tiny executable served by a generic web server under a standard CGI contract, so a route is trivially small, fast, and independent. Every route also answers `?format=json`, which is what makes the whole thing friendly to AI agents and headless clients.
+- **The agent is unchanged.** Everything SCORPIOX CODE does locally still works the same way. SCORPIOX BOT is an additional surface over the same sessions, not a replacement.
+- **The session files are the source of truth.** The API and the dashboard are both just views over the same on-disk state. There is no separate "remote copy" that can drift from the real thing.
+- **It is stateless on the wire.** Each endpoint does one thing and answers. You can call them from a browser, from `curl`, or from an automation pipeline, and they behave identically.
+- **It is opt-in per node.** A machine only appears in your fleet if you (or an admin) registered it. Nothing about a node reaches the dashboard until it is added.
 
-The split is deliberate. The API is the source of truth and the thing you script against. The web dashboard is a client of the same session data, pointed at one node at a time. If you only ever use the browser, the API is still underneath you; if you only ever script, you never need the browser.
+Two front doors, one dataset:
+
+| Half | What it is | Who it is for |
+|------|------------|---------------|
+| **`scorpiox-bot-api`** | Headless HTTP endpoints over the session files. JSON in, JSON out, SSE for live streams. | Scripts, CI, AI automation, mobile clients, anyone who wants to drive a session programmatically. |
+| **`scorpiox-bot-web`** | A pure C single-page dashboard: fleet overview, per-session chat, live terminal, node management. | People. Humans who want to see what the fleet is doing and type into it from a browser. |
+
+If you want to *watch and drive*, use the web. If you want to *automate* — feed prompts, harvest output, orchestrate a batch of sessions — use the API. Both hit the same endpoints, so anything you learn about one you already know on the other.
+
+---
+
+## The two pieces
+
+### `scorpiox-bot-api` — the headless core
+
+This is the part that actually touches your sessions. It is a collection of small, self-contained routes, one per concern, each served the same way. There is no persistent server process holding state; each request is handled on its own, which keeps it trivially cheap to run and easy to reason about.
+
+The routes fall into a few groups, and you only ever need to know the handful that matter to you:
+
+| Group | Endpoints | What they do |
+|-------|-----------|--------------|
+| **Sessions** | `GET /sessions` | List every live session on the node, newest first: name, project or working folder, profile, whether it is attached, and a live "thinking" flag when the agent is mid-turn. |
+| | `POST /sessions` | Spawn a new session for a project name or a folder path, optionally with a custom name and profile. |
+| | `DELETE /sessions?id=<session>` | Kill a session. |
+| **Conversation** | `GET /conversation?id=<session>` | Read the full conversation, or a slice after a given index with an optional limit. Backed by the per-session event files, so it is exactly what the agent has. |
+| | `GET /hashes_sse?id=<session>` | A live server-sent stream that pushes each new message as it lands. This is how the chat view stays real-time without polling. |
+| **Input** | `POST /inbox?id=<session>` | Send a message into a running session. Accepts a `mode` of `auto`, `interrupt`, or `queue` so you can choose whether to nudge, cut in, or wait your turn. |
+| | `POST /pty_input?id=<session>` | Low-level terminal input: raw keystrokes, viewport resize, or a signal interrupt. This is what makes the live terminal actually interactive. |
+| **Output / streaming** | `GET /stream?id=<session>` | A live server-sent stream of the terminal pane — raw ANSI frames, pushed only when the screen actually changes, so an idle session costs essentially nothing. |
+| | `GET /peek?id=<session>` | A one-shot capture of the current terminal screen, as JSON or as a rendered image. "What is it looking at right now?" answered in a single call. |
+| | `GET /peek_sse?id=<session>` | The continuous version of peek: a stream of rendered screen frames. |
+| **Fleet / node** | `GET /env` | Safe diagnostics: what is running, what the node sees. Read-only. |
+| | `GET /providers`, `GET /profiles`, `GET /projects` | What is available on *this* node: which providers are logged in, which profiles exist, which projects are launchable. |
+| **Misc** | `GET /api/ping` | Liveness check. |
+
+Two properties of the API are worth calling out because they are what make automation sane:
+
+- **Every route is JSON.** There is no proprietary wire format. You can `curl` any of these from a laptop, a cron job, or an agent, and parse the answer with the same code you would for any other REST service.
+- **Streaming is server-sent events, not websockets.** The live endpoints (`/stream`, `/hashes_sse`, `/peek_sse`, `/sessions_sse`) are plain SSE. That means they work through the same HTTP gate as everything else, they are easy to consume, and they cost almost nothing while idle — a frame is only pushed when the screen changes, and a keep-alive otherwise.
+
+### `scorpiox-bot-web` — the dashboard
+
+The web half is a single-page application written entirely in C, with no build step, no JavaScript bundle, and no Python. It sits in front of the API and gives you three views:
+
+- **The fleet hub** (`/`) — every node you can see, every live session on each, the ability to spawn a session or a plain terminal, and a node selector to jump between machines.
+- **Chat** (`/chat?id=<session>`) — the conversation with the agent, rendered as cards, with a live status bar, the infobox telemetry, and the same real-time streaming the API exposes. This is the "read the agent's output and answer it" view.
+- **Terminal** (`/terminal?id=<session>`) — an edge-to-edge, full-screen xterm terminal bound to the live session: keystrokes go in, frames stream out, and the pane resizes with your window. This is the "be there" view.
+
+There is also a **screen** view that is purely an observer — a live picture of the terminal with no input — and a **diagnostics** page for node health, credentials, and tunnels.
+
+The dashboard is the friendliest way to learn what the API can do, because every control you click is a direct call to one of the endpoints above. When something on the dashboard does what you want, the matching HTTP call is right there in the request.
 
 ---
 
 ## The remote session lifecycle
 
-A SCORPIOX CODE session is a live terminal process with a persistent record on disk. SCORPIOX BOT exposes that session across four operations: **start**, **peek**, **stream**, and **send**.
+A SCORPIOX BOT session is just a SCORPIOX CODE session you can reach from outside the machine. The lifecycle is the same one you already know — start it, talk to it, watch it, end it — and each step maps to a small number of calls.
 
-### 1. List and start sessions
+### 1. Discover what is there
 
-`GET /sessions` returns every live session on the node, newest first: its id, model, provider, working directory, profile, and when it started. That list is what the dashboard's session grid and the API's session picker both render.
+`GET /sessions` is the entry point. It returns every live session on the node, sorted newest first, with enough to act on:
 
-To start one, `POST /sessions` takes a target — either a **project name** or a **folder path** — plus an optional session name and an optional **profile** (the model/settings preset for that one session). The same endpoint powers the dashboard's "new session" flow and a `curl` one-liner from a script.
-
-There is also `POST /terminals` for a **plain shell with no agent** — open a working folder and run a command or an interactive shell — when you want a remote terminal rather than an agent.
-
-### 2. Peek at a session (one snapshot)
-
-When you want to *see* a session without attaching to it, you peek. A peek is a single, fast render of the session's current screen.
-
-- **`/peek`** returns a rendered image of the terminal — as **JSON** (the PNG wrapped as base64, plus dimensions) or as a **raw PNG**. The render happens in-process at millisecond latency; there is no screenshot process you are spawning or waiting on. This is the "what is the agent doing *right now*" call: a thumbnail in a card, or a screenshot to attach to a log.
-- **`/terminal_tmux`** and **`/terminal_scorpiox_multiplexer`** give you a **text** snapshot of a pane instead — the plain terminal contents, or the same thing as JSON. That is the cheap "just give me the screen as characters" form.
-- **`/conversation`** and **`/hashes`** give you the structured conversation as incrementally-syncable events (read everything, or read only what is newer than a point you already have). That is how a client stays caught up without re-downloading history.
-- **`/stats`** gives you the per-session diagnostics: token usage, cache countdown, branch, working directory.
-
-A peek is stateless and cheap; it does not disturb the session.
-
-### 3. Stream a session (live output)
-
-A peek is a photo; a stream is a video. **`/stream`** is a Server-Sent Events endpoint that pushes the terminal's ANSI frames to you in real time as they change — capped at roughly a dozen frames per second while the screen is moving. When the screen is not changing, nothing is pushed: a periodic keepalive keeps the connection alive instead.
-
-That quiet-when-idle property is what makes it safe to leave open: a long-running build you are not watching costs you almost nothing. The same streaming pattern exists for the session list (`/sessions_sse`) and for the interactive agent channels described below, so a dashboard can keep a whole fleet's status live with a handful of long-lived connections.
-
-The browser's chat view, the terminal view, and the panes grid are all built on these streams — you are not polling, you are being pushed.
-
-### 4. Send to a session (dispatch a prompt)
-
-The write side is **`/inbox`**. You POST a message to a session, and it lands in that session exactly the way you would type it in the terminal. The `mode` parameter controls how it is delivered:
-
-| `mode` | Behaviour |
-|--------|-----------|
-| `auto` (default) | Delivered normally; the session picks it up on its next turn. |
-| `interrupt` | Cancels whatever the agent is doing right now and delivers your message immediately. This is your "stop and do this instead." |
-| `queue` | Queues the message to be picked up after the current work finishes. |
-
-There is a related **`/queue`** for **quick messages** that are not tied to one session you have to be looking at — drop a note against a project or folder and the next agent run there picks it up. That is the "leave a sticky note for the agent" path, distinct from the live `/inbox` dispatch.
-
-### 5. Talk back to the agent (interactive channels)
-
-An agent does not only receive prompts; it asks questions and requests permission. SCORPIOX BOT exposes those as routes too, so a remote client can answer them:
-
-- **`/askuser`** — the agent's "question for a human" tool. Read the pending question, post an answer.
-- **`/permission`** — the agent's "may I run this command" gate. Read the pending request, approve or deny.
-- **`/callbacks`** — read or manage the agent's scheduled callbacks remotely (see the Scheduled Callbacks page), so an autonomous loop can be inspected or stopped without the terminal.
-- **`/thinking`**, **`/infobox`**, **`/commands`** — small read endpoints for the agent's state: is it thinking and for how long, its info box, and the slash commands available in that session.
-
-Each of these has a streaming sibling (for example, the live feed of pending questions) so a dashboard can light up the moment the agent needs you, then deliver your answer the moment you make it.
-
-The net effect: the *entire* interactive surface of a terminal agent — prompt in, output out, question, permission, scheduled loop — is reachable over HTTP. You can drive a SCORPIOX CODE session as if it were a service, not a person at a keyboard.
-
----
-
-## Two ways to talk to it: API vs dashboard
-
-### The headless API (for automation)
-
-The API is plain HTTP + JSON. Every route returns `application/json` (or an image where a snapshot is requested), and the whole surface is discoverable by trying routes. A minimal loop in any language looks like:
-
-```bash
-# List live sessions on the node
-curl -s "https://bot.scorpiox.net/sessions"
-
-# Snapshot a session's screen as an image (PNG) or base64 JSON
-curl -s "https://bot.scorpiox.net/peek?id=<session>&format=png" -o screen.png
-curl -s "https://bot.scorpiox.net/peek?id=<session>&format=json"
-
-# Snapshot a session's screen as plain text
-curl -s "https://bot.scorpiox.net/terminal_tmux?id=<session>&format=raw"
-
-# Dispatch a prompt to a session
-curl -s -X POST "https://bot.scorpiox.net/inbox?id=<session>&mode=auto" \
-     -H 'Content-Type: application/json' \
-     -d '{"text": "Run the test suite and summarize the failures."}'
-
-# Stream the terminal live (SSE)
-curl -sN "https://bot.scorpiox.net/stream?id=<session>"
+```json
+[
+  {
+    "name": "fix-auth-flow",
+    "id": "fix-auth-flow",
+    "worktree": "/codebases/myapp",
+    "profile": "agent-local",
+    "attached": false,
+    "thinking": true,
+    "thinking_started": 1759000000000
+  }
+]
 ```
 
-Because every route is JSON, an AI agent or a CI job can do with SCORPIOX BOT exactly what you do in the browser: check status, send work, read results. There is no private protocol to learn.
+The `thinking` flag is the one you will use most in automation: it tells you the agent is mid-turn, so you know whether to interrupt, queue, or wait. `attached` tells you whether a real terminal client is on it. `worktree` and `profile` tell you what you launched and where.
 
-### The web dashboard (for humans)
+### 2. Spawn one
 
-The dashboard is a single page that opens on a **session grid** for the node you have selected. From there:
+`POST /sessions` starts a new session. The target is either a **project name** (a directory under your codebases, e.g. `myapp`) or a **folder path** anywhere on the host (`/tmp/scratch`, `~/work`, `D:\work`). Both arrive the same way; a path is just a project name that happens to start with `/`, `~`, `\`, or a drive letter.
 
-- **Chat view** — a live, terminal-faithful view of one session with an input box that dispatches through `/inbox`, slash-command help, and the interactive channels (questions, permissions, callbacks) rendered inline as they appear.
-- **Panes** — a tmux-style grid of *every* active session on the node at once, each a live pane you can toggle between a chat view and a raw terminal.
-- **Multi-node selector** — a dropdown of every node in your fleet (see below). Pick one and the whole dashboard re-points at it: sessions, chat, panes, profiles, cron, providers.
-- **Per-node administration** — edit that node's configuration profiles, view and manage its scheduled cron jobs, and log it into model providers, all from the same page.
+```bash
+curl -X POST "$BOT/sessions" \
+  -H "Content-Type: application/json" \
+  -d '{"project": "myapp", "name": "fix-auth-flow", "profile": "agent-local"}'
+```
 
-The dashboard and the API are the same system from two angles. The dashboard's fetch calls *are* the API routes, plus the browser's auth token. Nothing in the browser has a capability the API does not have.
+The answer is the new session's name. If the node cannot create it — unknown project, name already taken — you get a clear `422` with the reason rather than a silent success. Once it is up, it shows in `/sessions` like anything else.
 
----
+You can also spawn a **plain terminal** with no agent at all, for the "I just want a shell on that box" case. That is a separate call from the web's "new terminal" action and does not create an agent session.
 
-## Authentication
+### 3. Watch it work
 
-SCORPIOX BOT is not open to the internet. Two layers of identity sit in front of the routes.
+This is where the two streaming modes earn their keep, and it is worth being precise about because they answer different questions.
 
-**1. You (the operator) are identified by JWT.** The API and the dashboard authenticate you with a token issued by the same identity provider that signs the rest of the platform. A browser presents it as a cookie after you sign in; a script or mobile client presents it as an `Authorization: Bearer` header. Every route checks it:
+**"What is the agent's conversation?"** Use the conversation stream. `GET /conversation?id=<session>` gives you the whole thing at once; `GET /hashes_sse?id=<session>` gives you each new message as it lands, live. This is the text — the model's replies, the tool calls, the results — and it is the feed the chat view renders.
 
-- **401** — no token, an invalid token, or a token from the wrong issuer.
-- **403** — a valid token, but your account does not carry the permission to use SCORPIOX BOT.
+**"What is the terminal showing?"** Use the screen stream. `GET /stream?id=<session>` pushes raw ANSI frames of the live pane, only when it changes. `GET /peek?id=<session>` is the one-shot version — a single capture of the current screen, as JSON or as an image, for the "just show me the picture" case. `GET /peek_sse` is the continuous version.
 
-Access is deliberately **admin-managed**: an account must be granted the bot permission before any route will answer for it. There is no self-serve signup to remote agent control.
+In practice the chat view uses the conversation stream and the terminal view uses the screen stream, and you can watch both at once. An idle session emits nothing but a keep-alive, so leaving a view open is effectively free.
 
-**2. The node is protected separately.** Each node can set its own node password. When a node password is set, the terminal/input routes require it (sent as a header or query value); when it is unset, the route is open — which is the self-hosted-on-your-own-LAN case where the box is already behind your firewall. The dashboard keeps each node's password in your browser's local storage and sends it only to that node, so the operator identity (JWT) and the per-node credential are two separate things.
+### 4. Talk to it
 
-The practical consequence: proving *who you are* is a platform-wide concern, and proving *you may reach this machine* is a per-node concern. A signed-in user talking to a node they own is the normal, fully-authorized path.
+`POST /inbox?id=<session>` is how you send a message into a running session. The body is the text; the `mode` decides what happens when the agent is busy:
 
----
+| Mode | Behaviour |
+|------|-----------|
+| `auto` | The default. The agent decides when to pick it up. |
+| `interrupt` | Cut into the current turn. The new message takes priority. |
+| `queue` | Wait your turn. Delivered when the agent reaches a natural break. |
 
-## Multi-node clustering: the fleet
+There is also a low-level `POST /pty_input` for raw keystrokes, resize, and interrupt — which is what the live terminal uses rather than the inbox, because typing into a shell is not the same as sending the agent a prompt.
 
-A single node is useful. A fleet is the point. SCORPIOX BOT treats every machine running a bot API as a **node**, and the dashboard knows a node is just an id plus a URL plus, optionally, a way to reach it.
+The rule of thumb: **inbox for the agent, pty_input for the shell.** If you are driving the model, send a message. If you are at the prompt, type.
 
-### Where a node can come from
+### 5. End it
 
-The dashboard can learn about nodes from up to three sources, and they are merged into one list with a "source" on each entry so you can tell where a node came from:
-
-| Source | What it is | When you use it |
-|--------|------------|-----------------|
-| **Local files** | Plain JSON node files the operator keeps on the box. Read-only from the web. | Self-hosting a small, fixed set of machines you control by hand. |
-| **Cloud registry** | A shared, account-scoped registry so a signed-in user sees the fleet that belongs to them. | A team or a personal cloud where nodes are registered once and appear on every box. |
-| **Reverse tunnel (mesh)** | A node behind NAT that dials *out* to a hub and holds the connection open. The hub then forwards ordinary requests down that open socket. | Reachable-anywhere nodes: a laptop at home, a box with no public address, a dev machine on a phone network. |
-
-The first two are **static** (you registered them); a tunnel node is **live** (it appeared because that machine is currently dialed in). A node id that exists in your own registry always wins over a tunnel with the same id, because the deliberate entry beats whatever machine happened to connect.
-
-### How a node is reached
-
-The dashboard resolves the selected node to a URL and points the chat, stream, and API calls at it. Three reachability modes cover the real world:
-
-- **Direct** — the node has an address the dashboard can reach (your LAN, a VPS, a tunnel endpoint).
-- **Relay** — for a node that can only be reached through an allowed path on your own network.
-- **Auto** — the default: try the right thing and fall back.
-
-For a machine behind NAT you cannot reach at all, the **reverse tunnel** is the answer: the node runs a small hub-facing client that opens the connection for you, and the dashboard reaches it as if it were direct. A tunnel node carries an `online` flag from the hub, so the fleet view honestly shows you which remote machines are actually reachable right now.
-
-### Self-hosting without a cloud account
-
-None of this requires a cloud account. The node registry can be backed by **local files only**, and the dashboard can run with a single implicit owner instead of the platform's identity provider. That combination — file-backed registry, single-user identity, no external network — is the "my own box, my own LAN, no account" deployment. The same dashboard, the same routes, the same fleet view; the only difference is where the node list and the identity come from.
+`DELETE /sessions?id=<session>` kills the session. That is the whole thing. The session's files remain on disk (so you can inspect what happened), the pane goes away, and it disappears from `/sessions`.
 
 ---
 
-## A typical workflow
+## Multi-node clustering and the fleet
 
-1. **Open the dashboard** and pick a node from the fleet selector. The session grid populates live.
-2. **Start a session** against a project or folder, choosing a profile (model preset) for it.
-3. **Watch it work** in the chat view or in the panes grid — output streams in; nothing polls.
-4. **Intervene when you need to.** Send a follow-up, or `interrupt` to cut in and redirect, or answer the permission prompt and question that pop up inline.
-5. **Leave it running.** The stream goes quiet and costs nothing while idle. Come back later and peek at a snapshot to see where it is, or dispatch the next task.
-6. **Scale out.** Register the build server, the home laptop (tunneled), and the lab box; they all appear in one selector, each with its own sessions, profiles, cron, and providers.
+The single-machine case is the easy one. The reason for SCORPIOX BOT is the case where you have several machines — your desktop, a build box, a server, a box at home behind a router — and you want them to look like one fleet.
 
-The same steps work from a script: `GET /sessions` to find the id, `POST /inbox` to dispatch, `/stream` to follow, `POST /permission` to unblock — the headless path is the browser path without the browser.
+### Nodes
+
+A **node** is a machine running the API, registered so the dashboard knows where to reach it. The dashboard keeps a node selector: pick a node, and every view — sessions, chat, terminal — resolves against that node's API. The same session name on two different nodes is two different sessions, and the selector is what keeps them apart.
+
+Nodes come from a registry, and the registry can be backed however you like:
+
+- **A local file registry** for a self-hosted setup — plain JSON on the node, no account, no network dependency. This is the default and it is the one you want if you are running your own fleet on your own LAN.
+- **A cloud registry** for a setup that wants nodes to follow you across devices, with each node reporting where it lives and how to reach it.
+- **Live tunnels** for the node that cannot be reached by IP at all — a machine behind NAT that dials *out* to a hub and holds a connection open, so the dashboard can reach it even though nothing can reach it directly.
+
+The three sources are layered, and an entry that is deliberately registered always beats one that merely appeared. Every node the dashboard shows carries a `source` and an online/offline state, so you can tell at a glance whether a node is a registered one you added or a tunnel that just dialed in — and whether it is actually up right now.
+
+### Reaching a node
+
+For each node, the dashboard resolves a target URL and proxies your calls to it. The same endpoint works the same way no matter which node you are on: the dashboard takes the request, finds the node's address from the registry (or from the live tunnel if that is the source), and forwards it, presenting your identity along the way. That is why a chat view on a tunnelled node behaves exactly like one on a LAN node — the node resolution is a detail the dashboard absorbs.
+
+You can also point the dashboard at a node by raw URL on your own LAN, which is handy for trying a node before you register it. That mode is intentionally something you enable yourself and is not something you would do for a public fleet.
+
+### What clustering buys you
+
+- **One selector, many machines.** Spawn, watch, and kill sessions across the whole set without SSHing anywhere.
+- **Per-node context.** Profiles, providers, and projects are properties of a node, and the dashboard reads them from the node you are looking at, so "what can this box run" is always accurate for the box you mean.
+- **Honest liveness.** A node that is down or a tunnel that has dropped shows as offline instead of silently failing, and the dashboard degrades to what it can actually reach rather than hanging.
 
 ---
 
-## Gotchas
+## Authentication and access
 
-- **A node you cannot reach is not a node you can use.** A tunnel node shows offline if its machine is asleep or its uplink is down; the fleet list is honest about reachability, but a dashboard pointed at an unreachable node will not invent sessions.
-- **`interrupt` really does interrupt.** Use it to redirect a running agent; a plain `auto` message waits its turn.
-- **The API and the dashboard share one identity.** If a signed-in account lacks the bot permission, both the browser and the scripts get a 403 — grant the permission to the account, not to the machine.
-- **Node passwords are per-node, not per-user.** The dashboard stores them in your browser's local storage and sends each one only to its own node.
-- **The cloud registry path is the default and the stable one.** Switching the registry backend (cloud, files, or a mix) changes where the node list comes from, not how the routes behave — a route you can hit today behaves the same after a backend change.
-- **Streaming is push, not poll.** Do not build a poller against a stream; open one connection and let it push. The idle-cost guarantee only holds if you let the endpoint decide when to send.
+SCORPIOX BOT is a remote-control surface, so it is gated by default. Every API route checks authentication before it does anything, and the answer is one of:
+
+| Outcome | Meaning |
+|---------|---------|
+| `401` | No valid identity. The token is missing, invalid, or from the wrong issuer. |
+| `403` | Valid identity, but it does not have the permission to use the bot. |
+| `404` | Authenticated, but that session does not exist on this node. |
+
+There are two ways to authenticate, and which one you use depends on whether you are on a single trusted box or in a shared setup.
+
+**A node password** for a single-user, self-hosted box. If the node is set up with a local password, a client presents it as a `Bearer` token or a header, and that is all there is to it. No account, no external service. This is the mode to reach for when the API is only ever talking to you.
+
+**A signed-in identity** for a shared or cloud setup. A normal signed-in user presents their token, the route verifies it, and then checks that the identity carries the permission to use the bot. Access is admin-assigned — being able to sign in is not the same as being allowed to drive the fleet, and the permission check is what separates the two. The dashboard uses the same identity: a signed-in browser is authenticated once, and every node it touches presents that identity on the user's behalf.
+
+Two practical consequences of this:
+
+- **You are always driving as a real identity.** Even on the single-node password path, the call is attributable; there is no anonymous lane into a fleet.
+- **The dashboard never smuggles a credential it should not have.** When it proxies your request to a node, it presents *your* identity, not a service credential of its own, so the node still sees who is actually in the browser.
+
+---
+
+## Choosing the front door
+
+The decision is simple and you rarely need both at once:
+
+- **Use the web dashboard** to operate the fleet by hand: see what is running, open a chat, jump into a terminal, spawn work on another box. It is the fastest way to understand the system, and it is what you will use day to day.
+- **Use the API** to automate: a script that dispatches a prompt to every box in the fleet and waits for the result; a CI step that spins up a session, streams its output, and collects it; an AI that orchestrates other SCORPIOX CODE sessions by calling the same endpoints. Because every route is plain JSON and streaming is plain SSE, the API is consumable from anywhere HTTP goes.
+
+The two share the same data and the same session lifecycle, so the boundary is not about capability — anything the dashboard does, the API does too. It is about who is on the other end: a person, or a program.
 
 ---
 
 ## Related
 
-- [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
-- [Using the /keepalive Command](keepalive.md)
-- [Project Instructions (CLAUDE.md / AGENTS.md)](project-instructions.md)
+- [Privacy Architecture and Zero Data Collection Guarantee](data-privacy.md)
+- [Long-Horizon Agent Tasks: Conversation Compaction](conversation-compaction.md)
+- [Project Instructions in SCORPIOX CODE](project-instructions.md)
