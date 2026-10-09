@@ -11,7 +11,7 @@ It comes in two faces that share the same engine:
 - **The TUI** — launch it with no arguments and you get a live dashboard: a list of active sessions up top, a `>` prompt at the bottom where you type slash commands, and a pane view for peeking and watching a session's screen.
 - **The headless CLI** — the same operations as `--` flags, for scripts, automation, and "I just want to do this one thing without a dashboard."
 
-Docs for SCORPIOX CODE @ `13253cf`.
+Docs for SCORPIOX CODE @ `ad926d7`.
 
 > **The whole idea in one line:** every agent is a *session*; `scorpiox-tmux` lists them, starts them, lets you peek or watch their screen, sends them input, and tears them down — all from one command, in a TUI or from a script.
 
@@ -114,6 +114,7 @@ The headless equivalent is `scorpiox-tmux --send <session> <message>`, where eve
 ## Starting, restarting, and stopping
 
 - **`/new`** starts a session. If the name is already taken it tells you and does nothing — use `/restart` to replace it, or `/enter` if you just want "get me to a running session with this name."
+- **`/new` fails loudly when a repo's worktree cannot be created.** When you give a named session on a git project, it gets its own worktree; if that worktree cannot be made (a broken repo, a branch already checked out elsewhere), `scorpiox-tmux` refuses to start and tells you why, rather than silently dropping the session onto the shared main checkout. A named session that lands on main would share one working tree and one session record with any other session on that repo. Plain (non-git) folders are unaffected: they always run in place. If you genuinely want a named session on the main checkout, pass `--allow-main` on the CLI to opt in.
 - **`/enter`** is the "just get me in" command: it creates the session if needed and attaches. This is usually the command you want when you are working interactively.
 - **`/restart`** kills and recreates, in one step — the way to recover a session that has wedged, optionally switching mode or build at the same time.
 - **`/kill`** tears the session down. It removes the session's record (the small file that maps the session name to its directory), but it **never deletes your checkout or the worktree tree** — files on disk are always left alone.
@@ -126,7 +127,7 @@ The dashboard refreshes its list automatically about every five seconds, and `/l
 
 `/projects` (and `scorpiox-tmux --projects`) lists the project directories `scorpiox-tmux` can start sessions in, read from the configured **project base paths**. The list also powers the autocomplete you get on the project argument of `/new` and `/enter`, so you can type the first few letters of a repo and hit **Tab**.
 
-On Unix the base path defaults to `/codebases` (set `TMUX_REMOTE_BASE` to point elsewhere, or to a `:`-separated list of paths). On Windows, `TMUX_REMOTE_BASE` is **required** — there is no auto-detect — and is a `;`-separated list, e.g. `D:\codebases`.
+Leave `TMUX_REMOTE_BASE` empty and the base path is **auto-detected**: `/codebases` on Unix (`C:\codebases` on Windows) first, then a `codebases` folder under your home directory. Set `TMUX_REMOTE_BASE` to point somewhere else — `:`-separated on Unix, `;`-separated on Windows. If none of those locations exist, `scorpiox-tmux` prints a clear error naming the key rather than silently finding nothing.
 
 ---
 
@@ -184,7 +185,7 @@ Every dashboard operation has a CLI form. The most common:
 ```bash
 scorpiox-tmux --list [--output-json]              # list sessions
 scorpiox-tmux --projects                          # list startable projects
-scorpiox-tmux --new <project|/dir> [--mode M] [--branch B] [--name S] [-m MODEL]
+scorpiox-tmux --new <project|/dir> [--mode M] [--branch B] [--name S] [-m MODEL] [--allow-main]
 scorpiox-tmux --enter <project> [--mode M] [--branch B] [--name S]
 scorpiox-tmux --resume <session>                  # attach
 scorpiox-tmux --restart <session> [--mode M] [--branch B]
@@ -207,6 +208,8 @@ scorpiox-tmux --new D:\work\app                # Windows path, used as-is
 ```
 
 A direct directory (anything starting with `/`, `~`, `./`, or a drive letter) is used exactly as it is — no worktree is created, even if the folder is not a git repo. The session is still recorded so `--list` and the bot API can find where it lives.
+
+When a named session's worktree is created, `scorpiox-tmux` picks up the latest `main` and makes a fresh branch for the session. If you later re-run a task name whose worktree was cleaned up, the leftover branch is **reused** rather than treated as an error — exactly what you want when requeueing a past task. A branch that is still checked out in another live worktree is the real collision, and that is what the loud abort above is for.
 
 ### Running a one-off command: `--cmd`
 
@@ -259,7 +262,7 @@ The input bar hints that you can start anything with `/` — and the autocomplet
 |---|---|
 | `TMUX_MODE` | `local` or `remote` — run sessions on this machine or over SSH. |
 | `TMUX_REMOTE_HOST` | The SSH host, when `TMUX_MODE=remote`. |
-| `TMUX_REMOTE_BASE` | Where projects live. `:`-separated on Unix, `;`-separated on Windows. Defaults to `/codebases` on Unix; **required** on Windows. |
+| `TMUX_REMOTE_BASE` | Where projects live. `:`-separated on Unix, `;`-separated on Windows. Empty = auto-detect (`/codebases` then `~/codebases`; `C:\codebases` then `%USERPROFILE%\codebases` on Windows). |
 | `TMUX_WORKTREE_BASE` | Where per-session git worktrees are created. Default: in a `.worktrees` folder beside the repo. |
 | `TMUX_BACKEND` | `tmux` or `sxmux` (or auto-detect). |
 | `TMUX_LAUNCH_MODE` | Default launch mode: `unshare`, `podman`, `wsl`, or `native`. |
@@ -284,7 +287,7 @@ Everything else falls back to safe defaults. Check what a machine is actually us
 
 ### Windows notes
 
-- `TMUX_REMOTE_BASE` is mandatory. Set it in `%LOCALAPPDATA%\scorpiox\scorpiox-env.txt` (e.g. `TMUX_REMOTE_BASE=D:\Workspace`) or with `setx TMUX_REMOTE_BASE D:\Workspace`, then relaunch. Without it, `--projects` is empty and project lookups fail.
+- `TMUX_REMOTE_BASE` is auto-detected too (`C:\codebases`, then `%USERPROFILE%\codebases`), so you only need to set it when your repos live elsewhere. Set it in `%LOCALAPPDATA%\scorpiox\scorpiox-env.txt` (e.g. `TMUX_REMOTE_BASE=D:\Workspace`) or with `setx TMUX_REMOTE_BASE D:\Workspace`, then relaunch. If no candidate location exists, `--projects` is empty and startup prints an error naming the key.
 - Set `SXMUX_RUNTIME_DIR` to a **machine-wide** directory such as `C:\ProgramData\sxmux` if a Windows service (which has no user profile) must see sessions created from your desktop logon — the default temp location is per-logon, so the two halves would otherwise not see the same sessions.
 - `native` is the launch mode you can rely on there; the agent binary is located by absolute path so it works even when the session's shell has no user PATH.
 
@@ -322,7 +325,7 @@ The headless versions of the same steps are `--new`, `--watch`, `--send`, `--ent
 - **`/kill` never deletes files.** It removes the session record and kills the process; the checkout and any worktree stay on disk for you to reuse or clean up yourself.
 - **`@branch` is not a git branch.** It selects the SCORPIOX CODE build deployed into the session.
 - **The model flag is `-m` / `--model` on the CLI**, and only on `--new`, `--restart`, and `--enter` — not on `--resume`, which just attaches to what is already running.
-- **`TMUX_REMOTE_BASE` is mandatory on Windows.** Without it, `--projects` is empty and project lookups fail; there is no auto-detect there.
+- **`TMUX_REMOTE_BASE` is optional everywhere.** Empty means auto-detect: `/codebases` then `~/codebases` (`C:\codebases` then `%USERPROFILE%\codebases` on Windows). If none exists, `--projects` is empty and an error naming the key is printed.
 - **`peek` and `watch` are read-only.** They capture the pane; they never send anything. Only `/send` (and `--send`) write to a session.
 - **Sessions survive service restarts on Linux.** When the first session of a batch is started from inside a system service, the session host is deliberately placed outside that service's control group, so restarting the service does not kill every running agent. Set `SCORPIOX_TMUX_NO_CGROUP_ESCAPE=1` if you want the old behavior.
 

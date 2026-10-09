@@ -1,287 +1,335 @@
 # Token Usage Observability
 
-Every API response SCORPIOX CODE receives carries a token-usage report: how many tokens went in, how many came out, how much of your prompt was served from the provider's cache, how close you are to your rate limits, and how fast tokens are flowing. SCORPIOX CODE makes that report visible in three places — the live status bar in the terminal interface, a machine-readable `stats.json` file in the session folder, and a status event pushed to host applications that embed the agent. On top of those local surfaces, an opt-in tracker can post usage counts to a usage API.
+An agent that spends your money has to show you where it went. SCORPIOX CODE takes that literally: **every token count is visible in three places, at the same time, from three different angles** — a live status bar you watch while the agent works, a machine-readable JSON file you can drive your own tooling from, and a small embedding API for hosts that build their own UI.
 
-All three local surfaces are computed from the same data, so they always agree — and none of them sends anything anywhere.
+There is no dashboard you have to log into, no invoice you have to reconcile after the fact, and no number you have to take on faith. The count is on your screen while the turn runs, on your disk the instant the turn ends, and reachable from code if you are embedding the agent. All three read from the same source of truth, so they never disagree.
 
-Docs for SCORPIOX CODE @ `77c49df`.
+Docs for SCORPIOX CODE @ `ad926d7`.
 
-> **The whole idea in one line:** the status bar shows the last three turns live, `.scorpiox/sessions/<session>/stats.json` mirrors the same telemetry as a JSON file refreshed about once a second for your own tooling, and embedded hosts receive the same numbers as a status event every two seconds — while anything that leaves your machine is off unless you turn it on.
-
----
-
-## The surfaces at a glance
-
-| Surface | Where it lives | Refresh | Audience |
-|---------|----------------|---------|----------|
-| Status bar | Bottom of the terminal UI | Every frame | You, while you work |
-| `stats.json` | `.scorpiox/sessions/<session>/stats.json` | ~1 Hz + on every response | Scripts, dashboards, `watch` |
-| Embedding status event | Delivered to the host app (callback or event queue) | Every 2 s | Host applications (WPF, bots, SDK consumers) |
-| Usage tracking (opt-in) | HTTPS POST to `USAGE_API_URL` | After every API response | A usage collection endpoint you choose |
-
-The first three are local-only. The fourth is the one thing that can cross the network, and it ships disabled.
+> **The whole idea in one line:** usage is observable on the surface you are already looking at (the status bar), in a file you already own (`.scorpiox/sessions/<session-id>/stats.json`), and through an API you already call if you embed SCORPIOX CODE — and the optional usage report is off by default.
 
 ---
 
-## The live status bar
+## Why three surfaces, not one
 
-The bottom of the terminal interface stacks the last **three** responses, newest at the bottom of the block and drawn at full brightness; the two older rows are dimmed (70% and 50%) so your eye lands on the current turn. A typical row reads:
+Different jobs need the number in different shapes.
+
+| Surface | What it is for | Where you find it |
+|---------|----------------|-------------------|
+| **Status bar** | Human, at-a-glance, live. You see what each turn cost while it is happening. | The TUI, always visible |
+| **`stats.json`** | Machine-readable contract. Your scripts, editors, and external tools read it. | `.scorpiox/sessions/<session-id>/stats.json` |
+| **Embedding API** | Host applications that draw their own interface instead of the TUI. | The public DLL used to embed the agent |
+
+The status bar is for you watching the work. The JSON file is for anything that reads your work programmatically. The embedding API is for when you *are* the interface. None of them requires the network; all of them are local.
+
+---
+
+## Surface 1 — the live status bar
+
+The status bar sits at the bottom of the TUI. It is **five lines tall**, and every line is a fixed slot, so nothing slides around as values change.
 
 ```
-rsn:412 T:1847 in:212 R:98341 W:1204 out:1635 5h:12% 7d:3% ~pp:2143t/s ~tg:87t/s
+ rsn:232 T:36986 in:36643 R:35840 W:803 out:343 pp:1240t/s tg:38t/s
+      T:36280 in:36066 R:34688 W:1378 out:214
+      T:35163 in:34902 R:33792 W:1110 out:261
+ [BG:0/2] [CB:1 3:12] [| bash: npm test]        CTX:190K
+ ~/projects/myapp                    KA:2              T 4:32
 ```
 
-### Per-turn fields
+The three stacked usage rows are **history**: the newest turn is the bottom usage row, the previous two sit above it. Each row is one API response, right-aligned and color-coded. Reading from oldest at the top to newest at the bottom, you can see how the cost of a turn is trending — a context that keeps growing shows up as a rising `R:` (cache read) on each new row.
 
-| Field | Meaning | Shown when |
-|-------|---------|------------|
-| `rsn:` | Reasoning tokens the model spent thinking | Provider reports them (> 0) |
-| `T:` | Total for this API call — input + output tokens | Always |
-| `in:` | Input tokens processed fresh this turn | Always |
-| `R:` | Cache-read tokens (prompt served from cache — green, the good stuff) | > 0 |
-| `W:` | Cache-write tokens (prompt prefix newly written to cache — orange) | > 0 |
-| `out:` | Output tokens generated | Always |
-| `5h:` | 5-hour rate-limit utilization, percent | Provider reports it |
-| `7d:` | 7-day rate-limit utilization, percent | Provider reports it |
-| `pp:` | Prompt-processing speed, tokens/second | Server reports timings, or estimate enabled |
-| `tg:` | Token-generation speed, tokens/second | Server reports timings, or estimate enabled |
+### Every field on a usage row
 
-Two refinements on the speed fields: a tilde (`~pp:`, `~tg:`) means the number is a **client-side estimate**, not a server-reported timing; and `~e2e:` instead of `~tg:` means only an end-to-end rate was measurable (no first-token timestamp), so generation speed is approximated as output over total wall time. Server-reported timings always win over estimates. Estimates are enabled with `USAGE_SPEED_ESTIMATE=1` (off by default), and on OpenAI-compatible endpoints they additionally need `OPENAI_STREAM=1` so the client can see the first token arrive.
+| Field | Meaning | Color |
+|-------|---------|-------|
+| `rsn:` | Reasoning tokens produced for this turn. Shown only when the model reports reasoning. | Magenta |
+| `T:` | **Total tokens for this turn** — the sum of input and output for that single API call. | Light gray (bold on the newest row) |
+| `in:` | Input tokens sent to the model for this turn. | Gray |
+| `R:` | **Cache read** tokens — context reused from the provider's prompt cache. Shown only when greater than zero. | Green (reuse is good) |
+| `W:` | **Cache write** tokens — context written into the provider's cache this turn. Shown only when greater than zero. | Orange |
+| `out:` | Output tokens generated by the model this turn. | Cyan |
+| `5h:` | Rolling **5-hour** rate-limit utilization, as a percentage. Shown only when the provider reports it. | Green under 50%, yellow 50–80%, red above 80% |
+| `7d:` | Rolling **7-day** rate-limit utilization, as a percentage. Shown only when the provider reports it. | Green under 50%, yellow 50–80%, red above 80% |
+| `pp:` | **Prompt processing speed** in tokens/second (how fast the prompt was ingested). Shown only when a speed is available. | Gray |
+| `tg:` | **Token generation speed** in tokens/second (how fast the reply streamed out). Shown only when a speed is available. | Gray |
 
-The rate-limit fields are color-coded by utilization: green below 50%, yellow from 50–80%, red above 80%.
+Two details worth knowing about the speeds:
 
-Around the usage rows, the status bar carries the session chrome:
+- When a speed is a **client-side estimate** rather than a figure reported by the server, it is prefixed with `~` — for example `~pp:820t/s`. The `~` is your cue that the number is derived from timing, not reported by the endpoint.
+- When only an **end-to-end** rate is known (the total output divided by the total wall time, with no separate prompt/generation split), the generation field is labelled `e2e:` instead of `tg:`. A turn that shows `~e2e:41t/s` had its speed estimated, not measured.
 
-| Element | Meaning |
-|---------|---------|
-| `folder icon` + path | Current working directory (left, clickable — opens the file explorer). Home is abbreviated to `~` |
-| `branch icon` + name | Current git branch (hidden outside a repo) |
-| `CTX:190K` | The configured context-window threshold — the point where SCORPIOX CODE compacts the conversation (default 190,000 tokens; shown as `CTX:190K`) |
-| `T 4:32` | Cache countdown — time left before the provider's prompt cache expires (see below) |
-| `KA` indicator | Cache keep-alive state: `KA:<n>` green when pings are keeping the cache warm, `KA*` while a ping is in flight, `KA||` when paused after misses, `KA-` idle, hidden when keep-alive is off |
-| `[CB:n 2:14]` | Scheduled callbacks: how many are active and time until the next one fires |
-| `No token data yet` | Placeholder until the first response arrives |
+If a provider does not report a given value at all, that field is simply omitted from the row. An absent `5h:` means "this provider did not send a 5-hour utilization figure," not "zero."
 
-### The cache timer
+### The rows above the history: branch, context, and indicators
 
-The `T m:ss` countdown tracks how long your prompt cache stays hot. The total window follows the keep-alive trigger: with keep-alive disabled it is the provider's default 5 minutes (green while more than 60% remains, yellow under 3 minutes, red under 1 minute, and `T --:--` once expired). When keep-alive is enabled, the window matches `CACHE_KEEPALIVE_TRIGGER` (default 270 s), so the timer doubles as a preview of when the next keep-alive ping will fire. Every real response — and every successful keep-alive ping — resets the clock.
+Directly above the working-directory line sits the branch row:
+
+- **Git branch** — the branch the session is running on, when the session is in a repository.
+- **`CTX:`** — the **context indicator**. This is the context-window size the agent will keep before it compacts, rounded to thousands — `CTX:190K` means a 190,000-token threshold. This is the budget you are spending against; the `R:`/`in:` figures on the usage rows are how much of it you have actually filled.
+- **Right-side live indicators**, when active:
+  - `[BG:r/t]` — background tasks running out of total.
+  - `[CB:n m:ss]` — scheduled callbacks active and the countdown to the next one.
+  - `[<spinner> bash: <command>]` — a background shell command still running, with a spinning cursor.
+
+### The bottom line: directory, timer, and cache keep-alive
+
+The bottom line holds the current working directory on the left and, on the right, two fixed-width fields:
+
+- **The cache timer** (`T m:ss`) — how long the provider's prompt cache for the last turn stays warm. It counts down and changes color as it ages: **green** while comfortably fresh, **yellow** as it approaches expiry, **red** in the final minute, and `T --:--` once the window has closed. Keeping the cache warm is what makes `R:` high and `in:` cheap on the next turn; the timer is the clock for that.
+- **The keep-alive indicator** — the state of the optional cache keep-alive: `KA:2` when active with a ping count, `KA*` while pinging, `KA||` when paused, `KA-` when idle, and blank when keep-alive is disabled. This tells you at a glance whether the agent is holding the cache open between your messages.
+
+The timer and the keep-alive field occupy **fixed positions**, so the row never jitters when the keep-alive text changes.
+
+### What "total" means here — and what it does not
+
+`T:` is **per turn, not cumulative**. It is the input plus output for that one API response. It is deliberately *not* the size of your conversation and *not* a running session sum: a session that has had five turns shows five rows, each with its own `T:`. For the size of the live context, read `R:` (cache read — the reused context) or `in:` (input) on the newest row, and compare it against the `CTX:` budget.
 
 ---
 
-## `stats.json` — the machine-readable contract
+## Surface 2 — `stats.json`, the machine-readable contract
 
-Everything the status bar knows is also written to a JSON file in the session folder, refreshed at most once per second while the interface runs and immediately after each response lands. This is the surface for your own tooling: point `watch`, a Grafana JSON datasource, a CI script, or a sidebar widget at it and you get the same numbers the UI shows.
+Everything the status bar shows is also written to a single JSON file in the session folder:
 
 ```
 .scorpiox/sessions/<session-id>/stats.json
 ```
 
-The session id looks like `2026_10_03_prickly_liskov`. The file is written **atomically** — the content lands in a temporary file that replaces the old one in one step — so a reader never observes a half-written file, even at 1 Hz.
+This is the file that turns usage from something you *look at* into something you *automate*. Point a script, a status widget, a CI cost gate, or an editor plugin at it, and you have live telemetry with no server in the middle.
 
-### Structure
+### Where it lives and how fresh it is
 
-```json
-{
-  "updated_ms": 1759420692000,
-  "model": "sonnet",
-  "cwd": "~/projects/demo",
-  "branch": "main",
-  "context_max": 190000,
-  "history": [
-    {"T":1847,"in":212,"R":98341,"W":1204,"rsn":412,"out":1635,
-     "rl_5h":0.1200,"rl_7d":0.0340,"pp":2143.10,"tg":87.40,"speed_estimated":1},
-    {"T":980,"in":180,"R":97120,"W":0,"rsn":0,"out":800,
-     "rl_5h":0.1100,"rl_7d":0.0330,"pp":0.00,"tg":0.00,"speed_estimated":0}
-  ],
-  "cache_timer": {
-    "last_response_ms": 1759420678000,
-    "elapsed_s": 14,
-    "remaining_s": 286,
-    "fresh_s": 180,
-    "total_s": 300,
-    "color": "green"
-  },
-  "keepalive": { "state": "DISABLED", "ping_count": 0 },
-  "callbacks": { "active_count": 0, "next_fire_ms": 0, "remaining_s": 0 },
-  "bash": { "running": false, "command": "" },
-  "bgtasks": { "running": 0, "total": 0 },
-  "retry": {
-    "active": false, "http_code": 0, "attempt": 0, "max_attempts": 10,
-    "next_at_ms": 0, "remaining_s": 0, "reason": ""
-  },
-  "usage": {
-    "input_tokens": 212,
-    "output_tokens": 1635,
-    "cache_read_tokens": 98341,
-    "cache_creation_tokens": 1204,
-    "reasoning_tokens": 412,
-    "total_tokens": 1847,
-    "rl_5h": 0.1200,
-    "rl_7d": 0.0340,
-    "prompt_tps": 2143.10,
-    "gen_tps": 87.40,
-    "speed_estimated": 1
-  }
-}
-```
+- **Location.** One file per session, in the session's own folder alongside the conversation and event records. `SX_SESSION_DIR` (exported into the session environment) points at that folder, so tools running inside a turn can resolve it without guessing.
+- **Freshness.** The file is rewritten on a **throttled 1 Hz cadence** while the interface is live — never more than once a second, and it is also written immediately when a turn completes, so a finished turn's numbers are on disk right away. Treat it as a near-live snapshot: at most a second behind the screen, and exact at rest.
+- **Atomicity.** Writes go to a temporary file and are then renamed into place. A reader never sees a half-written file; you either get the previous snapshot or the new one, never a torn one.
+- **Worktrees get a mirror.** When a session runs inside a git worktree, the same content is written to the main repository's session folder as well, so a tool watching the main tree sees the stats even though the agent is working in a worktree.
 
-### Field reference
+### The full field reference
+
+The file has a top-level identity block, three snapshot blocks (`cache_timer`, `keepalive`, and the live-state group), and two usage blocks (`history` and `usage`).
 
 **Top level**
 
 | Key | Type | Meaning |
 |-----|------|---------|
-| `updated_ms` | int | Epoch milliseconds when this snapshot was written — check it to detect a stale file |
-| `model`, `cwd`, `branch` | string | Current model name, working directory, git branch (empty when outside a repo) |
-| `context_max` | int | Context-window threshold in tokens (the `CTX:` indicator's raw value) |
-| `history` | array | Up to **3** usage entries, **newest first** — same fields as the status bar rows (see below) |
-| `usage` | object | The latest response's usage, exploded into full names (this is the convenient one for scripts) |
+| `updated_ms` | integer | Wall-clock timestamp (milliseconds) of the moment this snapshot was written. Use it to detect staleness. |
+| `model` | string | The model name for the session. |
+| `cwd` | string | Current working directory. |
+| `branch` | string | Git branch, empty when not in a repository. |
+| `context_max` | integer | The context-window threshold in tokens (the `CTX:` figure). |
 
-**`history` entries** (and the equivalent `usage` block, which uses its long-form key names)
+**`history`** — an array of up to **three** turn objects, newest first. Each object is one API response:
 
-| Key | Meaning |
-|-----|---------|
-| `T` | Total for the call: input + output tokens |
-| `in` / `out` | Input and output tokens |
-| `R` / `W` | Cache-read and cache-write tokens |
-| `rsn` | Reasoning tokens |
-| `rl_5h` / `rl_7d` | Rate-limit utilization as a fraction (0.12 = 12%); `0` when the provider doesn't report it |
-| `pp` / `tg` (history), `prompt_tps` / `gen_tps` (usage block) | Prompt-processing and generation speed, tokens/second; `0` when unknown |
-| `speed_estimated` | `0` = server-reported timings, `1` = client-side `pp`/`tg` estimate, `2` = end-to-end estimate only |
+| Key | Type | Meaning |
+|-----|------|---------|
+| `T` | integer | Total tokens for that turn (input + output). |
+| `in` | integer | Input tokens for that turn. |
+| `R` | integer | Cache read tokens. |
+| `W` | integer | Cache write (creation) tokens. |
+| `rsn` | integer | Reasoning tokens. |
+| `out` | integer | Output tokens. |
+| `rl_5h` | number | 5-hour rate-limit utilization, 0.0–1.0 (`0.7340` is 73.4%). |
+| `rl_7d` | number | 7-day rate-limit utilization, 0.0–1.0. |
+| `pp` | number | Prompt processing tokens/second. |
+| `tg` | number | Generation tokens/second. |
+| `speed_estimated` | integer | `0` = server-reported, `1` = client estimate, `2` = end-to-end only. This is the machine equivalent of the `~` and `e2e:` markers on screen. |
 
-Note the two speed-key spellings: compact `pp`/`tg` inside `history`, long-form `prompt_tps`/`gen_tps` inside `usage`.
+**`usage`** — the newest turn, expanded, with its own key names:
 
-**`cache_timer`**
+| Key | Type | Meaning |
+|-----|------|---------|
+| `input_tokens` | integer | Input tokens. |
+| `output_tokens` | integer | Output tokens. |
+| `cache_read_tokens` | integer | Cache read tokens. |
+| `cache_creation_tokens` | integer | Cache write tokens. |
+| `reasoning_tokens` | integer | Reasoning tokens. |
+| `total_tokens` | integer | Total for the turn (input + output). |
+| `rl_5h` | number | 5-hour utilization, 0.0–1.0. |
+| `rl_7d` | number | 7-day utilization, 0.0–1.0. |
+| `prompt_tps` | number | Prompt processing tokens/second. |
+| `gen_tps` | number | Generation tokens/second. |
+| `speed_estimated` | integer | `0` / `1` / `2` as above. |
 
-| Key | Meaning |
-|-----|---------|
-| `last_response_ms` | Epoch ms of the newest response (what the countdown counts from) |
-| `elapsed_s` / `remaining_s` | Seconds since it, seconds left (capped at the window and at 99:59) |
-| `fresh_s` / `total_s` | Green threshold and full window in seconds — follows `CACHE_KEEPALIVE_TRIGGER` when keep-alive is on (default 300/180 when off) |
-| `color` | `green`, `yellow`, `red`, or `expired` — the same color the UI timer uses |
+> Note the naming difference on purpose: the compact `history` rows use shorthand (`pp`, `tg`) while the expanded `usage` block uses long names (`prompt_tps`, `gen_tps`). Both describe the same two numbers.
 
-**Status blocks**
+**`cache_timer`** — the state of the prompt-cache window:
 
-| Key | Meaning |
-|-----|---------|
-| `keepalive` | `state`: `DISABLED`, `IDLE`, `ACTIVE`, `PINGING`, or `PAUSED`; `ping_count`: pings sent for the current session |
-| `callbacks` | `active_count`, `next_fire_ms` (epoch, `0` = none), `remaining_s` until the next fire |
-| `bash` | Minimized background shell: `running` + the command it is running |
-| `bgtasks` | Background task counters: `running` and `total` |
-| `retry` | Transient-error retry state: `active`, upstream `http_code`, `attempt`/`max_attempts`, `next_at_ms`, `remaining_s`, and a short `reason` |
+| Key | Type | Meaning |
+|-----|------|---------|
+| `last_response_ms` | integer | Timestamp of the most recent response. |
+| `elapsed_s` | integer | Seconds since that response. |
+| `remaining_s` | integer | Seconds left before the cache window closes. |
+| `fresh_s` | integer | The threshold above which the window is considered "fresh" on screen. |
+| `total_s` | integer | The full cache lifetime for this session. |
+| `color` | string | The on-screen timer color: `green`, `yellow`, `red`, or `expired`. |
+
+**`keepalive`** — the optional cache keep-alive state:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `state` | string | `DISABLED`, `ACTIVE`, `PINGING`, `PAUSED`, or `IDLE`. |
+| `ping_count` | integer | Total keep-alive pings sent. |
+| `trigger_sec` | integer | The idle interval that triggers a ping. |
+| `max_pings` | integer | Ping budget for the window. |
+| `max_tries` | integer | Retry budget per ping. |
+| `cache_hits` | integer | Pings that found a warm cache. |
+| `cache_misses` | integer | Pings that found a cold cache. |
+| `consecutive_misses` | integer | Consecutive misses — a signal the cache is not being reused. |
+| `remaining_s` | integer | Seconds left in the current keep-alive window (`-1` when inactive). |
+| `message` | string | The keep-alive prompt text. |
+
+**`callbacks`** — scheduled callbacks:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `active_count` | integer | Number of active scheduled callbacks. |
+| `next_fire_ms` | integer | Epoch-ms timestamp of the next scheduled fire. |
+| `remaining_s` | integer | Seconds until that fire. |
+
+**`bash`** — background shell:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `running` | boolean | Whether a background shell command is running. |
+| `command` | string | The command, when one is running. |
+
+**`bgtasks`** — background tasks:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `running` | integer | Background tasks currently running. |
+| `total` | integer | Background tasks tracked in total. |
+
+**`retry`** — an in-flight retry, when the provider returned a transient error:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `active` | boolean | Whether a retry is pending. |
+| `http_code` | integer | The HTTP status that triggered the retry. |
+| `attempt` | integer | Current attempt number. |
+| `max_attempts` | integer | Attempts allowed. |
+| `next_at_ms` | integer | Epoch-ms timestamp of the next attempt. |
+| `remaining_s` | integer | Seconds until the next attempt. |
+| `reason` | string | Why the retry is happening. |
 
 ### Reading it
 
 ```bash
-# Live view, once per second
-watch -n 1 cat .scorpiox/sessions/$(ls -t .scorpiox/sessions | head -1)/stats.json
+# Latest input/output for the newest session
+jq '.usage | {input_tokens, output_tokens, total_tokens}' \
+  .scorpiox/sessions/*/stats.json | tail -n 20
 
-# Pull the latest cache-read count with jq
-jq '.usage.cache_read_tokens' .scorpiox/sessions/*/stats.json
+# How full is the context, against the budget?
+jq '{filled: .usage.cache_read_tokens, budget: .context_max} | . + {pct: (.filled / .budget * 100)}' \
+  .scorpiox/sessions/*/stats.json
+
+# Is the cache still warm?
+jq '.cache_timer.color' .scorpiox/sessions/*/stats.json
+
+# Sum every turn still in the rolling history
+jq '[.history[].T] | add' .scorpiox/sessions/*/stats.json
+
+# A cost gate: fail if one turn exceeded a ceiling
+jq -e '.usage.total_tokens < 50000' .scorpiox/sessions/*/stats.json
 ```
 
-If you work inside a **git worktree**, the file is dual-written: once under the worktree's `.scorpiox/sessions/<id>/` and once under the main repository's, so a dashboard watching the main repo still sees worktree sessions.
+Because it is a plain file with a fixed shape, you can also poll it from an editor plugin, a tmux status segment, or a CI step — no API, no network, no account.
 
 ---
 
-## The embedding / SDK path
+## Surface 3 — the embedding path
 
-Host applications that embed the agent engine (a WPF shell, a bot process, any consumer of the `sx.dll` P/Invoke interface) receive the same telemetry as a **status event** — a JSON string pushed to the host every **2 seconds**, either through a registered event callback (instant delivery) or by polling the event queue.
+When you embed SCORPIOX CODE in your own application instead of running the TUI, you draw your own interface — but you should not have to re-derive the numbers. The public embedding API hands them to you in two forms.
 
-```json
-{
-  "model": "sonnet", "provider": "anthropic", "session": "2026_10_03_prickly_liskov",
-  "tools": true, "thinking": true, "busy": false,
-  "mem_mb": 412.3, "cpu_pct": 7.1, "forks": 0, "fds": 34,
-  "cwd": "C:\\projects\\demo", "branch": "main",
-  "in": 212, "out": 1635, "cache_r": 98341, "cache_w": 1204, "rsn": 412,
-  "total": 101392, "ctx": 190000,
-  "cb_active": 0, "cb_next_sec": -1, "cache_sec": 286,
-  "rl_5h": 0.1200, "rl_7d": 0.0340,
-  "pp": 2143.10, "tg": 87.40, "speed_estimated": 1
-}
-```
+### The last-usage snapshot
+
+The embedding layer exposes the **most recent usage snapshot** for the running agent as a structured value. Each field maps one-to-one to what the status bar shows:
 
 | Field | Meaning |
 |-------|---------|
-| `model`, `provider`, `session` | Active model, provider name, session id |
-| `tools`, `thinking`, `busy` | Tool use enabled, thinking enabled, agent currently processing |
-| `mem_mb`, `cpu_pct`, `forks`, `fds` | Host process resource snapshot |
-| `cwd`, `branch` | Working directory and git branch |
-| `in`, `out`, `cache_r`, `cache_w`, `rsn` | The latest response's usage breakdown |
-| `total` | **Input + output + both cache fields** — see the gotcha below before comparing this to `T` |
-| `ctx` | Context-window threshold (the `CTX:` value) |
-| `cb_active`, `cb_next_sec` | Active callback count; seconds until the next fire (`-1` = none) |
-| `cache_sec` | Seconds of cache lifetime remaining on a fixed 5-minute window (`-1` = no response yet) |
-| `rl_5h`, `rl_7d` | Rate-limit utilization fractions |
-| `pp`, `tg`, `speed_estimated` | Speeds and their provenance, same semantics as `stats.json` |
+| `input_tokens` | Input tokens for the last response. |
+| `output_tokens` | Output tokens for the last response. |
+| `cache_read_tokens` | Cache read tokens. |
+| `cache_creation_tokens` | Cache write tokens. |
+| `reasoning_tokens` | Reasoning tokens. |
+| `ratelimit_5h_utilization` | 5-hour rate-limit utilization, 0.0–1.0. |
+| `ratelimit_7d_utilization` | 7-day rate-limit utilization, 0.0–1.0. |
+| `ratelimit_overage_utilization` | Overage utilization, 0.0–1.0. |
+| `prompt_per_second` | Prompt processing tokens/second. |
+| `predicted_per_second` | Generation tokens/second. |
+| `ratelimit_status` | Provider-reported rate-limit status. |
+| `ratelimit_representative_claim` | Provider-reported claim metadata. |
+| `speed_estimated` | `0` / `1` / `2`, same meaning as the status bar markers. |
+| `seq` | A monotonic response counter — each API response gets a distinct value, so a host can tell two responses apart even when their token counts are identical. |
 
-Sessions run headless or with SDK consumers can additionally emit **per-turn usage files**: with `--emit-session` (implied by `--headless`), each response writes `messages/msg_NNNN_usage.json` inside the session folder, containing `turn`, `in`, `out`, `cache_read`, `cache_create`, plus the full rate-limit set (`rl_5h`, `rl_7d`, `rl_overage`, `rl_status`, `rl_claim`). Unlike `stats.json`, these files are an append-only per-turn record — every turn, forever, not just the last three.
+A host that wants a running total can accumulate these snapshots across turns; the agent deliberately reports **per-response** values so the host stays in control of how it aggregates (the same per-turn semantics as `T:` on the status bar).
+
+### The periodic status event
+
+Alongside per-response data, the embedded agent pushes a **status event on a fixed ~2-second cadence** to whatever callback or receive loop the host registered. The event carries the live aggregates a host needs to paint its own status bar: the model and provider, busy/thinking flags, the token figures (`in`, `out`, `cache_r`, `cache_w`, `rsn`, `total`), the context threshold (`ctx`), the callback countdown, and the cache timer (`cache_sec`) — plus the rate-limit and speed fields (`rl_5h`, `rl_7d`, `pp`, `tg`, `speed_estimated`). It is the same shape of information the TUI status bar renders, delivered as data rather than drawn for you.
+
+That is the division of labor for embedding: **per-response truth** from the last-usage snapshot, **live aggregates** from the status event. A host that draws a status bar uses both; a host that only needs an end-of-turn number uses the first.
 
 ---
 
-## Opt-in usage tracking
+## Opt-in usage reporting
 
-By default, **nothing described so far leaves your machine**. The one outbound surface is the usage tracker, and it ships disabled:
+Everything above is local. Separately, and **off by default**, SCORPIOX CODE can post token counts to a usage endpoint. This is the one part of the usage story that talks to a network, and it is entirely your choice.
+
+### How to turn it on
+
+It is a single setting in the normal configuration cascade:
 
 ```ini
-# scorpiox-env.txt
-USAGE_TRACKING=0                      # default: off
-USAGE_API_URL=https://code.scorpiox.net/usage-send
+USAGE_TRACKING=0          # 0 = disabled (default), 1 = enabled
+USAGE_API_URL=https://code.scorpiox.net/usage-send   # endpoint override
 ```
 
-With `USAGE_TRACKING=1`, after every API response SCORPIOX CODE fires a one-shot `scorpiox-usage send` command (fire-and-forget, never blocks your turn) that POSTs a small JSON record to the configured endpoint. The record contains:
+Set `USAGE_TRACKING=1` in any configuration tier — global, user, project, or a one-off OS variable — and usage reports begin after each API call. Leave it at `0`, which is the default, and nothing about usage ever leaves your machine. Because it flows through the standard cascade, you can scope it precisely: enable it for one project, for one machine, or for one command invocation, without touching anything else. See [Configuration and Profiles](scorpiox-env.md) for how the tiers resolve.
 
-```json
-{
-  "metadata": {
-    "session_id": "2026_10_03_prickly_liskov",
-    "provider": "anthropic",
-    "model": "sonnet",
-    "hostname": "workstation-1",
-    "username": "alice",
-    "os": "linux", "arch": "x86_64", "os_version": "6.8.0",
-    "project": "demo", "branch": "main",
-    "scorpiox_version": "1.2.3",
-    "ratelimit_5h_utilization": 0.1200,
-    "ratelimit_7d_utilization": 0.0340,
-    "ratelimit_overage_utilization": 0.0000
-  },
-  "usage": {
-    "input_tokens": 212,
-    "output_tokens": 1635,
-    "cache_creation_input_tokens": 1204,
-    "cache_read_input_tokens": 98341
-  }
-}
+### What would be sent
+
+When enabled, the report is fired as a **fire-and-forget background call** after a response, and it carries two groups of fields:
+
+- **Machine metadata** — session id, provider, model, project name, git branch, hostname, username, OS, architecture, OS version, and the SCORPIOX CODE version.
+- **Token counts** — input, output, cache read, and cache write, plus the service tier and the provider-reported rate-limit utilization and status when available.
+
+There is a standalone `scorpiox-usage` command that performs one report; the agent uses it internally, and you can invoke it yourself for testing or automation:
+
+```bash
+scorpiox-usage send -s <session-id> -p <provider> \
+  -i 12000 -o 800 -cr 11000 -cw 500
 ```
 
-Notes on the payload:
+Because the whole path is skipped before any network work happens when tracking is off, an unset or `0` value means the report command does not run at all.
 
-- Machine metadata (`hostname`, `username`, `os`, `arch`, `os_version`) is collected automatically; `project` defaults to the basename of your working directory and `branch` to the current git branch. Optional fields (`model`, `project`, `branch`, rate-limit strings) are omitted when empty.
-- `service_tier` is included when the provider reports one.
-- Point `USAGE_API_URL` at your own collector to keep the data entirely in-house. An empty value falls back to the built-in default endpoint — set a real URL rather than blanking it.
-- Turn tracking back off at any time with `USAGE_TRACKING=0` in any configuration-cascade tier; the setting is read per invocation, so it takes effect immediately. See [Configuration and Profiles](scorpiox-env.md) for the tier order.
+### The honest boundary
 
-This is the same zero-collection stance as everything else in SCORPIOX CODE: see [Privacy Architecture and Zero Data Collection](data-privacy.md) for what stays on disk and what never leaves your machine, and [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md) for the verbatim on-disk capture of every request.
+- **Reporting is opt-in.** Default is off. Nothing is posted unless you set `USAGE_TRACKING=1`, and you can scope the setting to a single project or a single command.
+- **It reports usage, not content.** The payload is token counts plus machine metadata — it is not your prompts, your code, or your conversation. If you need to inspect *content* that leaves the machine, that is the separate, explicit traffic-logging path, documented in [API Traffic Logging](traffic-logging.md).
+- **`stats.json` and the status bar are unaffected by the setting.** Turning reporting on or off changes only whether a report is posted; the local surfaces always work. The usage observability you rely on locally never depends on the network.
+
+This is the same posture as the rest of the product: local by default, transparent by construction, and the network is something you switch on, never something you switch off. See [Privacy Architecture and Zero Data Collection](data-privacy.md) for the full stance.
 
 ---
 
-## Gotchas
+## Putting the three surfaces together
 
-- **`T` means different things on different surfaces.** In the status bar and `stats.json`, `T` is input + output for that call (cache tokens are visible separately as `R`/`W`). In the embedding status event, `total` is input + output + cache-read + cache-write. Do not compare `T` to `total` directly — reconstruct whichever definition you need from the individual fields, which are identical everywhere.
-- **`stats.json` is a live snapshot, not an audit log.** `history` holds only the last three responses. For a permanent per-turn record, use the `msg_NNNN_usage.json` SDK files (headless/SDK sessions) or traffic logging.
-- **Absent is not zero.** `5h`/`7d` and the speed fields are hidden or `0` when the provider doesn't report them — a missing rate-limit field means "unknown", not "unlimited".
-- **Estimated speeds wear a tilde.** `~pp`/`~tg` are client-side estimates that include network latency and are lower bounds for prompt processing; `~e2e` is even coarser. Server timings (llama.cpp and compatible endpoints) always take precedence.
-- **The cache timer window follows keep-alive.** With keep-alive enabled the countdown matches `CACHE_KEEPALIVE_TRIGGER`, and the fresh/warn boundary sits at 60% of that window — so a 270 s trigger turns yellow at 2:42, not 3:00.
-- **`updated_ms` is your staleness check.** If your dashboard reads a file whose `updated_ms` is minutes old, the session it describes has likely stopped rendering (or you are watching a worktree's mirror copy while the live one is elsewhere).
-- **Worktrees double-write.** Inside a worktree, both the worktree and the main repo get a copy of `stats.json` — point collectors at one, not both, to avoid double-counting.
+| You want to… | Use |
+|--------------|-----|
+| Watch cost turn by turn as the agent works | The **status bar** |
+| See how full the context is against the budget | `R:` / `in:` on the newest row, versus `CTX:` |
+| Script a cost gate, a widget, or a dashboard | **`stats.json`** |
+| Draw your own UI in an embedded host | The **embedding API** (last-usage snapshot + status event) |
+| Post token counts to a central endpoint | **Opt in** with `USAGE_TRACKING=1` |
+
+Three surfaces, one source of truth: the count is on your screen as the turn runs, on your disk the moment it ends, and available to your code when you embed the agent — and the only part that ever leaves your machine is the part you explicitly turn on.
 
 ---
 
 ## Related
 
-- [Privacy Architecture and Zero Data Collection](data-privacy.md) — the zero-collection stance behind all of this.
-- [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md) — the verbatim on-disk record of every request and response.
-- [Configuration and Profiles](scorpiox-env.md) — where `USAGE_TRACKING`, `USAGE_SPEED_ESTIMATE`, and `CACHE_KEEPALIVE_TRIGGER` sit in the cascade.
-- [Using the /keepalive Command](keepalive.md) — the mechanism behind the `T m:ss` countdown and the `KA` indicator.
+- [Data Privacy and Zero Data Collection](data-privacy.md) — the local-ownership guarantee that the default-off reporting preserves.
+- [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md) — the separate, explicit path for capturing request and response *content*.
+- [Configuration and Profiles](scorpiox-env.md) — how `USAGE_TRACKING` and the endpoint override resolve through the cascade.
+- [Cache Keep-Alive](keepalive.md) — what keeps the cache timer green and the cache-read figures high.
+- [Conversation Compaction](conversation-compaction.md) — what the context indicator (`CTX:`) governs.

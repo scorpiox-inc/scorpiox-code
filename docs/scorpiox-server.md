@@ -6,9 +6,9 @@ SCORPIOX CODE ships a different answer: **`scorpiox-server`**, a single native b
 
 This is the same server that powers the product's own public website, and the same one SCORPIO BOT supervises as its API tier. It runs sites in production every day.
 
-Docs for SCORPIOX CODE @ `77c49df`.
+Docs for SCORPIOX CODE @ `ad926d7`.
 
-> **The whole idea in one line:** drop `scorpiox-server` next to a folder of Python scripts or native executables, and the file names become the routes — with a mandatory HTML + JSON contract on every page, git-push deployment, built-in JWT authentication, an MCP mode that turns your scripts into agent tools, and a reverse-tunnel mesh for sites that live behind NAT — all in one zero-dependency binary.
+> **The whole idea in one line:** drop `scorpiox-server` next to a folder of Python scripts or native executables, and the file names become the routes — with a mandatory HTML + JSON contract on every page, git-push deployment, built-in JWT authentication, optional static-file serving, per-script response streaming, an MCP mode that turns your scripts into agent tools, and a reverse-tunnel mesh for sites that live behind NAT — all in one zero-dependency binary.
 
 ---
 
@@ -33,7 +33,7 @@ A few conventions make the whole system work:
 - **The route namespace is flat.** Names may contain letters, digits, `-`, `_`, and `.` — but not `/`. There are no subdirectories in routing. Scripts that need internal paths (like a docs tree) read `PATH_INFO` and route inside themselves.
 - **Traversal is blocked twice.** Names containing `..` are rejected, and every resolved file is verified to actually live inside its script directory before anything executes.
 
-If no script matches *and* there is no fallback, the request gets a clean `404` with a JSON error body.
+If no script matches, there is no fallback, and no static file is found, the request gets a clean `404` with a JSON error body.
 
 ---
 
@@ -77,9 +77,11 @@ Scripts run in a full CGI environment. The server sets everything a standard CGI
 | `HTTP_*` | Every other request header, uppercased with `-` → `_` (so `User-Agent` becomes `HTTP_USER_AGENT`) |
 | `POST_BODY_FILE` | Path to a temp file holding the POST body (buffered mode) |
 | `SX_STREAMING` | Set to `1` when the body is being streamed (see below) |
-| query parameters | **Each query parameter becomes its own environment variable** — `?platform=linux` arrives as `platform=linux` |
+| query parameters | **Each safely named query parameter becomes its own environment variable** — `?platform=linux` arrives as `platform=linux` |
 
 The query-parameter-to-environment mapping is the workhorse: a script reads `os.environ.get('platform')` and never parses a query string. The product's own install router does exactly this — one `?platform=` parameter, read straight out of the environment.
+
+**Query parameters are filtered, and never overwrite anything.** A request must not be able to redefine the environment a handler runs in, so only parameters whose names are `[A-Za-z0-9_]`, start with a non-digit, and contain at least one lowercase letter are exported — and only when the name is not already set. Real parameters (`name`, `ref`, `token`, `dataBase64`) pass; all-uppercase names like `PATH`, `LD_PRELOAD`, `GIT_ORG`, `HTTP_AUTHORIZATION`, `REQUEST_METHOD`, or `POST_BODY_FILE` are dropped, as are the lowercase proxy variables (`http_proxy`, `https_proxy`, and friends). An operator's own `-e` value can never be clobbered by the request. If you need to pass an all-uppercase identifier through, send it in a POST body instead of the query string.
 
 POST bodies are handled in one of two ways:
 
@@ -114,17 +116,65 @@ Responses also carry permissive CORS headers on every reply (`Access-Control-All
 
 ## Limits and lifecycle
 
-Three keys govern resource behavior, all with defaults that suit most deployments:
+These keys govern resource behavior:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `SERVER_MAX_REQUEST_MB` | `200` | Maximum request body size |
-| `SERVER_MAX_RESPONSE_MB` | `200` | Maximum captured script output |
+| `SERVER_MAX_RESPONSE_MB` | `200` | Maximum buffered script output (a buffer cap, not a streaming cap) |
 | `SERVER_SCRIPT_TIMEOUT` | `300` | **Idle** timeout — seconds with no stdout activity |
+| `SERVER_STREAM_SCRIPTS` | *(empty)* | Script base names whose responses are streamed instead of buffered (Unix only) |
 
 The timeout is idle-based, not wall-clock: the deadline resets on every chunk the script produces. A report that streams progress for an hour is fine; a script that hangs silently for 300 seconds is killed (`SIGTERM`, then `SIGKILL` after a 100 ms grace) and whatever output was captured is returned. Bump `SERVER_SCRIPT_TIMEOUT` for scripts with long silent phases — SCORPIO BOT raises it to 900 seconds for exactly that reason.
 
 Concurrency is a process per request on Unix (fork) and a thread per request on Windows. That is the entire concurrency story — no worker pool to size, no event loop to starve. The listen backlog is 256.
+
+### When a response is too big to buffer: `SERVER_STREAM_SCRIPTS`
+
+The normal path captures a script's whole output in memory up to `SERVER_MAX_RESPONSE_MB`, sets `Content-Length`, and sends it. That is wrong for a script that produces an unbounded response — a `git clone` of a multi-gigabyte repository, a database dump, a large download. The request is tiny, so the size-based streaming heuristic never fires, and the response is truncated at the cap.
+
+`SERVER_STREAM_SCRIPTS` names the scripts whose **response** should be relayed as it is produced, regardless of request size:
+
+```ini
+SERVER_STREAM_SCRIPTS=_fallback,clone,export
+```
+
+For a listed script the server relays stdout straight to the client:
+
+- **No `SERVER_MAX_RESPONSE_MB` cap, no full-body buffering.** Memory stays flat while gigabytes flow.
+- **Idle timeout only** — the deadline resets on every read and write. A client that stops reading is bounded by a socket send timeout so it cannot pin the child forever.
+- **Correct HTTP framing.** If the script sets `Content-Length`, it is honored. Otherwise the response is chunked for HTTP/1.1 — and the terminating zero-chunk is only written when the script exits cleanly, so a script that fails midway shows up as a truncated transfer rather than a silently short body. HTTP/1.0 clients (which cannot parse chunks) get a close-delimited body instead.
+- **Clean child handling.** A client disconnect turns into `EPIPE` in the child, which is then sent `SIGTERM` and `SIGKILL` and reaped — no orphaned processes.
+
+The flag is a comma-separated list of script base names (up to 16). It applies to `_fallback` like any other script, so a catch-all download endpoint streams without extra wiring. **It is Unix-only:** on Windows the setting is ignored with a warning, because response streaming there would require a different relay path.
+
+---
+
+## Static files: `SERVER_STATIC_ROOT`
+
+Not every route is a script. When `SERVER_STATIC_ROOT` is set, GET/HEAD requests that match no script route (no `index`, no `{name}`, no `_fallback`) are served as files from that directory before the final 404:
+
+```ini
+SERVER_STATIC_ROOT=/var/www/assets
+```
+
+```
+/var/www/assets/
+  index.html      ->  GET  /
+  app.js          ->  GET  /app.js
+  img/logo.svg    ->  GET  /img/logo.svg
+```
+
+How it behaves:
+
+- **Scripts always win.** Static serving is the last resort, after every script route has been tried — existing sites are unaffected, and a file can never shadow a script of the same name.
+- **GET and HEAD only.** Other methods fall through to the normal 404 path.
+- **Directories resolve to `index.html`.** A request for a directory (or a path with no file) appends `index.html`.
+- **MIME types are chosen from the extension** — HTML, JS, CSS, JSON, images (PNG/JPEG/GIF/SVG/WebP), ICO, PDF, WASM, fonts (WOFF/WOFF2), audio/video (MP3/MP4), XML, text, ZIP/GZIP, and binaries; anything unknown is served as `application/octet-stream`.
+- **HEAD returns headers only.**
+- **Hardened.** A `..` in the path is refused up front, and the resolved file is verified to actually live inside the root (catching symlinks and encoded escapes). Files are opened read-only, streamed in 64 KB chunks, and sent with `Cache-Control: no-store, no-cache, must-revalidate`.
+
+This is how you host a pure-static site — a landing page, a docs tree, build artifacts, a Web UI's assets — on the same engine, and it pairs naturally with git deploy mode: point `-r` at a repo and set `SERVER_STATIC_ROOT` into the clone, and a `git push` updates your static assets too. Empty (the default) means off.
 
 ---
 
@@ -184,9 +234,7 @@ SERVER_JWT_COOKIE=sx_token
 
 The server validates **HMAC-SHA256** JWTs itself — no library, no middleware package. Tokens arrive as an `Authorization: Bearer` header or, if `SERVER_JWT_COOKIE` is set, from the named cookie (the header is checked first). Verification is constant-time, expired tokens (`exp`) are rejected, and optional `iss`/`aud` checks pin tokens to your issuer and audience. An empty `SERVER_JWT_SECRET` disables validation entirely — scripts then decide their own authentication, which is a legitimate mode for sites that handle auth internally.
 
-**Protecting routes:** `SERVER_JWT_PROTECT` is a comma-separated list of route prefixes that require a valid token. Unauthenticated requests are rejected based on what the client is: a browser (its `Accept` header includes `text/html`) gets a `302` redirect to `SERVER_JWT_LOGIN_URL`; anything else gets `401` with a JSON error body. One mechanism, both audiences.
-
-**Public exemptions:** `SERVER_JWT_PUBLIC` exempts routes from protection so a site can protect `/` and still serve assets or a health check. Matching is by whole path segment — `/assets` covers `/assets` and `/assets/x`, but not `/assetsX` — and a *valid* token presented on a public route is still validated and exported to the script. Protection and exemption compose instead of fighting.
+**Who gets blocked, and how.** Only routes whose path starts with a prefix in `SERVER_JWT_PROTECT` require a token. An unauthenticated browser (`Accept: text/html`) hitting a protected route is redirected to `SERVER_JWT_LOGIN_URL` when that is set; anything else gets `401` with a JSON error body. `SERVER_JWT_PUBLIC` carves exemptions back out of a protected prefix — a site can protect `/` yet leave `/assets` and `/api/health` open. The two match differently: `PROTECT` is a raw prefix match (`/admin` also covers `/adminX`), while `PUBLIC` matches whole path segments (`/assets` covers `/assets` and `/assets/x`, but not `/assetsX`). A trailing slash in either value is trimmed. A valid token on a public route is still validated and exported — public means *not required*, not *ignored*.
 
 **Identity reaches your scripts.** Every request exports what it knows about the caller as environment variables:
 
@@ -291,11 +339,9 @@ The cleanest way to run all of this: `scorpiox-bot --connect` supervises a mesh 
 
 The same source also builds **`scorpiox-server-dll`**, a shared library exposing `web_server_start`, `web_server_stop`, `web_server_status`, and `web_server_get_config` for embedding in another application via P/Invoke or FFI. Point it at a JSON config (`root_dir`, `route_prefix`, `port`) and your .NET (or anything-with-FFI) application hosts a full script-serving web server in-process — no side process, no port juggling between apps.
 
-This is worth knowing about even if you never use it, because it explains a design property: the HTTP handling is a component, not a monolith. The embedded form runs its own accept thread and dispatches requests through the exact same pipeline the standalone binary uses — the same routing, CGI environment, JWT gate, and limits. The code that serves `code.scorpiox.net` can live inside your process.
-
 ---
 
-## Against the mainstream stacks
+## How this compares to the mainstream stacks
 
 Here is what an operator would otherwise assemble, and what each piece costs:
 
@@ -306,12 +352,14 @@ Here is what an operator would otherwise assemble, and what each piece costs:
 | Script/runtime execution | CGI/FCGI + external process managers | mod_cgi / mod_fcgid / php-fpm | None natively — proxies to something that does | The app *is* the runtime (C#) | Native exec + `python3`, in-process |
 | Auth | Windows auth + modules; JWT via packages | Auth modules per scheme | Auth via config or proxied app | JWT bearer NuGet package + middleware code | **Built in, one config key** |
 | Git-push deploy | Web Deploy / MSBuild pipelines | Custom scripts | Custom scripts | `dotnet publish` + CI jobs | **Built in, one flag** |
+| Static files | IIS static handler + MIME config | mod_mime + config | `root`/`alias` + `try_files` | `UseStaticFiles()` middleware | **Built in, one directory key** |
+| Large/streamed responses | Response-buffering knobs | Proxy buffering directives | `proxy_buffering` / `sendfile` | `Results.Stream` in code | **Per-script streaming list** |
 | TLS | IIS bindings + certs | mod_ssl + cert wiring | Server blocks + certs | Kestrel behind IIS/nginx, typically | Any TLS terminator in front |
 | Machine-readable responses | App-level concern | App-level concern | App-level concern | App-level concern | **Stated contract on every page** |
 | Serving sites behind NAT | Needs tunneling product | Needs tunneling product | Needs tunneling product | Needs tunneling product | **Built in (mesh mode)** |
 | Config surface | web.config + app pools + modules | httpd.conf + .htaccess sprawl | nginx.conf + includes | Program.cs + appsettings.json + csproj | One `KEY=VALUE` file, same cascade as the agent |
 
-The honest framing: those stacks are excellent at the things they were built for, and a large organization with dedicated platform teams should keep them. What scorpiox-server changes is the **floor**. The floor for serving a script-backed site with authentication, deployment, and machine-readable responses drops from *five coordinated products and their wiring* to *one binary, one config file, and one git remote*. And when a site outgrows the floor — when you genuinely need nginx's raw proxy throughput or IIS's Windows integration — the TLS-terminator pattern means the mainstream stack slots in front of scorpiox-server without displacing it.
+The honest framing: those stacks are excellent at the things they were built for, and a large organization with dedicated platform teams should keep them. What scorpiox-server changes is the **floor**. The floor for serving a script-backed site with authentication, deployment, static assets, and machine-readable responses drops from *five coordinated products and their wiring* to *one binary, one config file, and one git remote*. And when a site outgrows the floor — when you genuinely need nginx's raw proxy throughput or IIS's Windows integration — the TLS-terminator pattern means the mainstream stack slots in front of scorpiox-server without displacing it.
 
 ---
 
@@ -334,6 +382,8 @@ cat > /etc/scorpiox/scorpiox-env.txt <<'EOF'
 SERVER_PORT=8080
 SERVER_SCRIPT_DIR=/var/site
 SERVER_ROUTE_PREFIX=/
+SERVER_STATIC_ROOT=/var/www/assets
+SERVER_STREAM_SCRIPTS=_fallback,export
 SERVER_JWT_SECRET=/etc/scorpiox/jwt.key
 SERVER_JWT_PROTECT=/admin
 SERVER_JWT_LOGIN_URL=https://login.example.com
@@ -354,12 +404,14 @@ Every key above is documented in the shipped `scorpiox-env.txt` and read through
 
 - **The default route prefix is not `/`.** The compiled-in default is `/api/platform/websites/` — a legacy integration path. Sites almost always want `SERVER_ROUTE_PREFIX=/`. Git deploy mode defaults to `/` for exactly this reason; bare mode does not. If your routes 404 and the banner shows a long prefix, this is why.
 - **`/api/ping`, `/api/otp`, and `/favicon.ico` are reserved.** A script named `api` will not shadow `/api/ping` — the built-in endpoints are matched before script routing. Plan around them.
-- **Query parameters become environment variables with their literal names.** A query parameter named `PATH_INFO` or `HTTP_COOKIE` will shadow the CGI variable of the same name — query-derived values are set last and win. Use distinctive parameter names so a request like `?content_length=1` cannot poison what your script reads.
+- **Query parameters are filtered, and never overwrite.** Only names of `[A-Za-z0-9_]` starting with a non-digit and containing at least one lowercase letter are exported, and never over an already-set variable. All-uppercase names (`PATH`, `REQUEST_METHOD`, `GIT_ORG`, `POST_BODY_FILE`) are silently dropped — pass uppercase identifiers in a POST body instead. The payoff: a request can no longer poison the environment your script, the CGI layer, or your own `-e` overrides run in.
 - **The idle timeout is not a total timeout.** A script that prints one dot every 299 seconds runs forever. If you need wall-clock limits, enforce them in the script.
 - **`SERVER_JWT_PROTECT` and `SERVER_JWT_PUBLIC` match differently.** `PROTECT` is a raw prefix match — `/admin` also protects `/adminX`. `PUBLIC` is whole-segment — `/assets` exempts `/assets/anything` but not `/assetsX`. A trailing slash in either value is trimmed, so `/assets/` behaves the same as `/assets`. If you protect `/admin`, protect against lookalike paths too (use `/admin/` and a route that never starts with the same letters).
 - **A valid token on a public route is still validated and exported.** Public means *not required*, not *ignored*. Scripts can rely on `X_USER_ID` on public routes when a token happens to be present — and should check `X_AUTHENTICATED` before trusting it.
 - **Git deploy mode serves the branch, not a release artifact.** A bad push goes live within one poll interval. Protect the branch, or use a deploy branch you push to deliberately.
-- **The response cap is a buffer cap, not a streaming cap.** SSE streams bypass the response cap (they stream), but a buffered script that would emit 300 MB gets truncated at `SERVER_MAX_RESPONSE_MB`. Raise the cap or switch the script to streaming output.
+- **The response cap is a buffer cap, not a streaming cap.** A buffered script that would emit 300 MB gets truncated at `SERVER_MAX_RESPONSE_MB`. Raise the cap, or list the script in `SERVER_STREAM_SCRIPTS` to stream its output with no size cap (Unix only).
+- **`SERVER_STREAM_SCRIPTS` is Unix-only.** On Windows the setting is ignored with a warning — size the response cap instead, or terminate at a proxy that streams.
+- **Static serving is the last resort.** `SERVER_STATIC_ROOT` only runs after every script route (including `_fallback`) has missed, so a `.html` file can never shadow a script of the same name. If a static page 404s while the file clearly exists, check that no `_fallback` script is swallowing the route.
 - **`/mcp` has no JWT gate of its own.** MCP tool calls run scripts with your privileges. Protect the port with `SERVER_IP_WHITELIST` or terminate auth at your TLS proxy before exposing it beyond a trusted network.
 - **Mesh workers need outbound connectivity only — and that is also their failure mode.** A worker that can no longer reach the hub disconnects; the hub returns `502 node offline` for its routes until it reconnects. Design clients to tolerate transient `502`s on `/node/` routes.
 - **The hub is plaintext by design.** Do not "fix" this by putting certificates on the hub — put a TLS terminator (Caddy, nginx, a load balancer) in front, exactly like the product's own mesh does.

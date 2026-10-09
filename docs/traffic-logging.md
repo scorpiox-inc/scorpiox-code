@@ -1,14 +1,14 @@
 # API Traffic Logging and Complete Remote Call Transparency
 
-Every agent you have used has made network calls on your behalf. Most of them do it in a way you cannot see, cannot replay, and cannot prove. The prompt you typed, the system instructions, the tool calls, the full context window, the exact endpoint, the exact headers, the exact response, the exact token count — all of it is assembled in memory, sent over the wire, and gone. When something goes wrong — a wrong model, a truncated context, a surprise cost, a context leak you did not expect — you are left arguing about what a tool did with your data and you have no way to check.
+Every time SCORPIOX CODE talks to a remote model, it makes a network call: a request carrying your prompt, your code, and the full conversation, and a response carrying the model's reply. Most tools treat that exchange as a black box. The request goes out, a reply comes back, and the details are gone — you are left trusting the tool that it sent only what it said it sent and received only what it said it received.
 
-SCORPIOX CODE is built the other way. **Every single remote call it makes is written to disk, verbatim, the moment it happens** — the request before it leaves, the response when it arrives, in plain files under your session directory, in a structure you can open with any editor, `cat`, `jq`, or `grep`. There is no database, no proprietary format, no "contact support to export your data." It is an **immutable, filesystem-native audit trail** of every byte that left or entered your machine on the agent's behalf.
+SCORPIOX CODE does not work that way. **Every single request it sends and every single response it receives from a remote LLM endpoint is written to disk, verbatim, the moment it happens.** Not sampled. Not summarized. Not "if something goes wrong." Every call, every time, to a plain folder you own on your own filesystem.
 
-This page is the full how-to: where the files live, what each one contains, how to read them, how to replay a captured call, and the exact guarantees that make this a transparency tool rather than a logging feature bolted onto a black box.
+That is the whole point of this page: you can open that folder, read every byte that left your machine and every byte that came back, and confirm with your own eyes that the network activity was exactly what you expected. There is no hidden telemetry, no silent background call, no request you did not approve. If it went over the wire, it is a file you can read. If you cannot find a file for a call, that call never happened.
 
-Docs for SCORPIOX CODE @ `13253cf`.
+Docs for SCORPIOX CODE @ `ad926d7`.
 
-> **The whole idea in one line:** every outgoing HTTP request and every incoming response SCORPIOX CODE sends to a remote model endpoint is saved verbatim to `.scorpiox/sessions/<session>/traffic/` — the full request body, the endpoint URL, the headers, the response payload, and the token usage — so you can inspect, verify, and replay exactly what left your machine at any turn.
+> **The whole idea in one line:** every outgoing HTTP request and every incoming response SCORPIOX CODE sends to a remote model endpoint is saved verbatim to `.scorpiox/sessions/<session>/traffic/` — the full request body, the endpoint URL, the headers, the response payload, and the token usage — so you can inspect, verify, and reproduce exactly what left your machine at any turn.
 
 ---
 
@@ -26,138 +26,115 @@ The guarantee is precise: **there is zero black-box network activity.** If SCORP
 
 ---
 
-## Where the capture lives
+## What "100% transparency" actually means
 
-Every session gets its own traffic directory, created automatically when the session starts:
+For each remote provider API call, SCORPIOX CODE captures:
+
+- **The exact request body** — the prompt, the full conversation context, the system instructions, the tool definitions, and the tool calls, exactly as serialized and sent. If the model saw your file contents, you can read them here.
+- **The exact endpoint and headers** — the full URL, the HTTP method, and the request headers, so you can verify *where* a call went, not just *what* was in it. Credential headers are masked (see the format notes below), so a capture is safe to share.
+- **The exact response** — the raw response payload the model returned, the HTTP status code, and the response headers.
+- **Timing and usage** — a timestamp for each direction and the token-usage figures the provider reported for that call.
+
+Because all of it is captured on the way out *and* on the way back, the record is complete and internally consistent. You are not being shown a friendly summary the tool composed; you are being shown the wire data.
+
+---
+
+## Where your traffic lives
+
+Every session gets its own traffic directory, created automatically the moment the session starts — before the first call is made, so the folder is always waiting:
 
 ```
 .scorpiox/
 └── sessions/
     └── <session-id>/
         └── traffic/
-            ├── traffic.log                 # chronological summary of every call
-            ├── raw/                        # one file per request or response
-            │   ├── 001-req-body.json
-            │   ├── 001-res-body.json
+            ├── traffic.log                 # chronological one-line index of every call
+            ├── raw/                        # verbatim bytes, one file per direction per call
+            │   ├── 001-req-headers.txt     # method, full URL, and request headers
+            │   ├── 001-req-body.json       # exact request body as sent
+            │   ├── 001-res-body.json       # exact response body as received
+            │   ├── 001-usage.json          # token usage reported by the provider
             │   ├── 002-req-body.json
             │   ├── 002-res-body.json
             │   └── ...
-            ├── raw_messages/               # message-oriented copy (per-endpoint)
+            ├── raw_messages/               # request/response mirrored in the provider's message shape
             │   ├── 001-req.json
             │   ├── 001-res.json
             │   └── ...
-            └── raw_usage/                  # extracted token-usage objects
+            └── raw_usage/                  # token-usage objects extracted from each response
                 ├── 001-usage.json
-                ├── 002-usage.json
                 └── ...
 ```
 
-A few things about that layout worth knowing up front:
+A few things about the layout:
 
-- **It is per-session.** Each session writes to its own `traffic/` directory, so sessions never overwrite each other. A session is a set of files you own — inspect, copy, or delete them at will.
-- **It is local.** Nothing in the traffic capture is uploaded anywhere. It is written to your filesystem, by your machine, for your eyes. (This is the same local-ownership guarantee described in [Data Privacy](data-privacy.md) — the traffic capture is the *evidence* for that guarantee.)
-- **The number is the sequence.** `001`, `002`, `003` … is the request number within the session, in the order calls were made. The request and its response share a number, so `001-req-body.json` and `001-res-body.json` are one call.
+- **`traffic.log` is the index.** It is a plain append-only text log. Each line records the time, the call number, the provider, the direction — `<-` for the request going out, `->` for the response coming back — and the payload size in bytes. It is the fastest way to see, at a glance, exactly how many remote calls a session made and roughly how large each one was.
+- **`raw/` is the ground truth.** The numbered files are the actual bytes. The request-headers file holds the method, the full endpoint URL, and the headers; the request-body and response-body files hold the verbatim payloads. The three-digit number is the call sequence within the session, so `004-req-body.json` and `004-res-body.json` are the two halves of the same fourth call. Depending on the provider, the response may be saved as a parsed JSON body or as the raw streaming event text, so what you see is what actually crossed the wire.
+- **`raw_messages/`** is a convenience mirror of the same request and response in the provider's message-oriented shape — handy when you are reasoning about the conversation rather than the wire format.
+- **`raw_usage/`** holds the provider's parsed token-usage object, pulled out of each response and written on its own so you can sum, diff, or audit cost independently of the rest of the payload.
 
----
-
-## What each file contains
-
-### `traffic.log` — the timeline
-
-A single, append-only, human-readable log of every remote call in the session, one line per event, oldest first:
-
-```
-[09:41:02] #001 openai <- (48211 bytes)
-[09:41:09] #001 openai -> (1204 bytes)
-[09:41:09] #002 openai <- (48990 bytes)
-[09:41:18] #002 openai -> (2876 bytes)
-```
-
-Each line carries a **timestamp**, the **sequence number** (`#001`), the **provider**, the **direction** (`<-` request going out, `->` response coming back), and the **byte size** of the payload. It is the fastest way to answer "how many calls did this session make, to whom, and how big were they" without opening a single file. Pair it with the `raw/` files when you want the actual content of a line.
-
-### `raw/` — the verbatim payloads
-
-This is the heart of the capture. One file per direction, per call, holding the **exact bytes** that were sent or received:
-
-- **`NNN-req-body.json`** — the complete outgoing request body: the full prompt, every message in the context, the system instructions, the tool definitions, the model name, and the sampling parameters. This is the literal data that left your machine.
-- **`NNN-res-body.json`** — the complete incoming response body: the model's reply, any tool calls it issued, and the provider's usage block. This is the literal data that came back.
-
-For providers that translate between wire formats (for example, an Anthropic-style request being converted to a Google endpoint), the intermediate forms are captured too — you can see both the request as the agent assembled it and the request as it was actually put on the wire. There is no hidden translation step between "what the agent thought it sent" and "what the network actually carried."
-
-The **endpoint URL and headers** for each call are recorded alongside the body, so you can see exactly which host, path, and headers a request used — not just the payload.
-
-### `raw_messages/` — the message-oriented copy
-
-A parallel copy of the request and response focused on the conversation itself (`NNN-req.json` / `NNN-res.json`). It is the same content as `raw/`, kept in a per-endpoint form that is convenient when you are reasoning about the conversation rather than the wire format.
-
-### `raw_usage/` — the token accounting
-
-For each response, the provider's **usage object** is extracted and saved on its own:
-
-```json
-{
-  "input_tokens": 48211,
-  "output_tokens": 312,
-  "cache_read_input_tokens": 0,
-  "cache_creation_input_tokens": 0
-}
-```
-
-This is the number you would be billed on, pulled out of the response and written to a file of its own so you can sum, diff, or audit it independently of the rest of the payload. It is the difference between "the tool told me this is what it cost" and "I can add up the raw usage files and confirm it myself."
+The naming is consistent across providers — OpenAI, Anthropic, Copilot, Codex, Claude Code, Grok, Gemini Vertex, and the rest all write into the same session `traffic/` tree. You learn the layout once and it holds everywhere. A session that mixes providers in a single run still produces one coherent, sequential record.
 
 ---
 
-## Reading a capture
+## How to read a call
 
-The files are plain JSON on disk. You do not need a special viewer, a plugin, or network access. A few common patterns:
-
-**See what a session sent and received at a glance:**
+To verify a specific turn, start with the index and drill in:
 
 ```bash
+# 1. See the whole session at a glance
 cat .scorpiox/sessions/<session-id>/traffic/traffic.log
+
+# 2. Read the exact prompt and context that left your machine
+jq . .scorpiox/sessions/<session-id>/traffic/raw/004-req-body.json
+
+# 3. Read what came back
+jq . .scorpiox/sessions/<session-id>/traffic/raw/004-res-body.json
+
+# 4. Confirm the endpoint and method
+cat .scorpiox/sessions/<session-id>/traffic/raw/004-req-headers.txt
 ```
 
-**Inspect the exact prompt of a specific call:**
+That is a complete, self-contained audit of one remote call. Repeat it for any call number, or for the whole session, and you have a full accounting of everything that crossed the network boundary.
+
+Three more patterns worth knowing:
 
 ```bash
-jq . .scorpiox/sessions/<session-id>/traffic/raw/001-req-body.json
-```
-
-**Check the token usage for the whole session:**
-
-```bash
+# Sum the token usage for the entire session
 jq -s 'map(.input_tokens) | add' \
    .scorpiox/sessions/<session-id>/traffic/raw_usage/*.json
-```
 
-**Find a leak** — search every request body for a string you did not expect to leave the machine:
-
-```bash
+# Find a leak — search every request body for a string that should not have left
 grep -l "SECRET_VALUE" .scorpiox/sessions/<session-id>/traffic/raw/*-req*.json
+
+# Diff two runs of the same task to see exactly what changed
+diff -ru run-a/traffic run-b/traffic
 ```
 
 If the string is not in any request file, it was not sent. That is the audit: the filesystem is the source of truth for what left your machine.
 
 ---
 
-## Replaying a captured call
+## Format notes you should know
 
-Inspecting a capture is one thing; being able to **reproduce** the exact call is what makes it a real debugging tool. SCORPIOX CODE ships an interactive helper, `scorpiox-executecurl`, that browses your traffic captures and re-issues any of them:
-
-```bash
-scorpiox-executecurl                 # list available captures
-scorpiox-executecurl <session-id>    # jump straight to one session
-```
-
-It walks the session traffic directories (and, for older layouts, the legacy capture locations) and lets you pick a call to replay. This is the difference between "I saw what happened" and "I can make it happen again" — essential when you are chasing a provider-side quirk, a context-length edge case, or a request that only fails under specific conditions.
+- **Credential headers are masked.** API keys and authorization headers are redacted before they are written, so a capture is safe to hand to a reviewer or attach to a bug report. The request *body* is captured verbatim — that is the point — so treat a `traffic/` folder with the same care you would treat the conversation itself.
+- **Nothing needs enabling.** There is no debug flag, no "start capture" button, and no export step. The trail is written as each call completes, and the session folder is the export.
+- **The directory follows the session.** When you compact, clear, or resume a session, traffic logging re-points to the new session folder, so records never leak into a previous session's directory. The call sequence starts fresh with each session.
+- **Worktrees are covered.** When you run a session from a git worktree, the same capture is mirrored into the main checkout's session folder, so the traffic record is visible from either location.
 
 ---
 
-## Which calls are covered
+## What you can do with it
 
-The capture is **provider-agnostic by design**. Every remote model endpoint SCORPIOX CODE can be pointed at — local inference servers, OpenAI-compatible hosts, and the various hosted provider integrations — writes its calls into the same `traffic/` structure for the active session. The shape of the wire format differs per provider, so the intermediate files carry provider-specific labels, but the layout, the sequence numbering, the `traffic.log` timeline, and the `raw_usage/` extraction are the same everywhere.
+The record is plain text and plain JSON in a real folder, so any tool you already have works on it:
 
-That uniformity is the point: you learn the layout once, and it applies to whichever endpoint your session used. A session that mixes providers in a single run still produces one coherent, sequential, verbatim record.
+- **Audit a single turn.** Confirm the exact prompt and context the model saw, and the exact reply it returned.
+- **Reproduce a request.** The endpoint, method, headers, and body are all present, so the call can be reconstructed. The `scorpiox-executecurl` utility browses your session traffic and re-issues a captured call for you, which turns "I saw what happened" into "I can make it happen again."
+- **Diff two runs.** Capture the same task twice and compare the `traffic/` folders to see precisely what changed in what was sent and what came back.
+- **Trace token cost.** `raw_usage/` gives you the provider-reported usage per call, so you can line up spend with the exact request that incurred it.
+- **Hand it to someone.** The folder is self-contained. Copy it and a reviewer can inspect every remote call without touching your machine.
+
+Because the files are written as the calls happen, the record is an immutable, filesystem-native audit trail. The evidence is on disk the moment each call completes.
 
 ---
 
@@ -165,9 +142,9 @@ That uniformity is the point: you learn the layout once, and it applies to which
 
 Honest about the edges, the same way the [Data Privacy](data-privacy.md) page is:
 
-- **The model endpoint sees the model traffic.** If you point SCORPIOX CODE at a hosted provider, *that provider* receives the prompts and returns the responses — that is inherent to using a hosted model. The traffic capture records what SCORPIOX CODE sent to and received from that endpoint; it does not, and cannot, see what the provider does internally with the request. Running local inference removes even that.
+- **The model endpoint sees the model traffic.** If you point SCORPIOX CODE at a hosted provider, *that provider* receives the prompts and returns the responses — that is inherent to using a hosted model. The traffic capture records what SCORPIOX CODE sent to and received from that endpoint; it does not, and cannot, see what the provider does internally with the request. Running local inference removes even that boundary.
 - **The capture is as complete as the call.** The guarantee is that every call SCORPIOX CODE makes is recorded. It is not a promise about what the provider's server does after it receives the bytes — that is the provider's business, and the capture is your record of the boundary between your machine and theirs.
-- **Local files are your responsibility.** Because the capture lives on your filesystem, deleting a session removes its traffic record — and nothing is kept on a server to restore it. That is the flip side of ownership, and it is the same trade as every other session file.
+- **Local files are your responsibility.** Because the capture lives on your filesystem, deleting a session removes its traffic record, and nothing is kept on a server to restore it. That is the flip side of ownership, and it is the same trade as every other session file.
 
 The guarantee, precisely: **by construction, every outgoing request and incoming response SCORPIOX CODE produces for a remote model call is written verbatim to `.scorpiox/sessions/<session>/traffic/` before the session moves on.** No call is hidden, summarized away, or sent without a local copy. If you can read your traffic capture, you can verify exactly what left your machine — and the only way a byte leaves the machine is for it to be in those files.
 

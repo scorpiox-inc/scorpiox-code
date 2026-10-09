@@ -6,7 +6,7 @@ You want an AI coding agent running somewhere it cannot touch your real machine 
 
 There is no daemon to install, no `dockerd` to keep running, no VM image to boot, and no network stack to configure. One binary, one command, one container.
 
-Docs for SCORPIOX CODE @ `13253cf`.
+Docs for SCORPIOX CODE @ `ad926d7`.
 
 > **The whole idea in one line:** `scorpiox-unshare <image> <command>` runs any agent or command inside a real Linux user namespace — no Docker, no podman, no daemon, no VM — and it is the default environment under every SCORPIOX CODE agent session.
 
@@ -58,7 +58,7 @@ Every container is a real kernel construct, not a chroot and not an emulation la
 - **Mount namespace + `pivot_root`.** The image is mounted as the container's root filesystem, and the container cannot see your host mounts at all. The only host paths inside are the ones you explicitly mounted.
 - **PID namespace.** The container has its own process tree and its own process numbering.
 - **UTS namespace.** The container gets its own hostname, taken from the image name.
-- **Network namespace (default).** By default the container gets its own network stack, wired to the outside through a userspace network process. See [Networking and ports](#networking-and-ports). `--net host` opts out.
+- **Network namespace (default).** By default the container gets its own network stack, wired to the outside through a small userspace network helper. See [Networking and ports](#networking-and-ports). `--net host` opts out.
 - **User namespace.** This is the core trick, and the reason nothing here needs root. Your unprivileged host user is mapped to `root` *inside* the container — so you are the administrator of the container and an ordinary user on your own machine at the same time. If the host has subordinate UID/GID ranges configured (`/etc/subuid` and `/etc/subgid`), the container gets a full range of identities so services that need real group handling work; without them it falls back to a single-identity map. When you run as actual root on the host, the user namespace is skipped — there is nothing left to gain from it.
 - **Filesystem layers.** On kernels that support overlayfs inside user namespaces (5.11 and newer), the read-only image is overlaid with a private writable layer, so the image itself is never modified. On older kernels it falls back to a bind mount of the image.
 - **Syscall and capability trimming.** Inside the container, dangerous kernel entry points are blocked with a seccomp filter and memory-locking capability is dropped from the bounding set before anything runs.
@@ -139,7 +139,17 @@ Limits to be aware of: up to **16** port mappings, **16** volume mounts, and **3
 
 ## Networking and ports
 
-The default is **isolated networking**: the container gets its own network stack with its own interfaces, and reaches the outside world through a small userspace network process (`slirp4netns`). The container sees a normal-looking interface and a resolver pointed at the network gateway; host loopback is not reachable from inside, which is the isolation you want.
+The default is **isolated networking**: the container gets its own network stack with its own interfaces, and reaches the outside world through a small userspace network process. The container sees a normal-looking interface and a resolver pointed at the network gateway; host loopback is not reachable from inside, which is the isolation you want.
+
+That network process is **bundled**. SCORPIOX CODE ships `scorpiox-slirp4netns`, a pure-libc, zero-dependency drop-in for the slirp4netns subset the runtime uses, placed next to the runtime binary. This means isolated networking works with nothing installed on the host — the runtime is genuinely self-contained. Which helper it picks is controlled by one variable, `SX_NET_BACKEND`:
+
+| `SX_NET_BACKEND` | Which helper is used |
+|---|---|
+| `auto` (default) | The system `slirp4netns` if it is installed, otherwise the bundled `scorpiox-slirp4netns`. |
+| `scorpiox` | Always the bundled `scorpiox-slirp4netns` (next to the runtime binary, then on `PATH`). |
+| `system` | Always the system `slirp4netns` from `PATH`. |
+
+If no helper can be found at all — a stripped-down host with neither the bundled binary nor a system `slirp4netns` — the runtime fails fast with a clear message rather than starting a container that cannot reach the network.
 
 To reach a service *inside* the container from *outside* it, publish a port:
 
@@ -159,7 +169,7 @@ By default a published port binds on all interfaces. Set `SX_PORT_BIND_ADDR=127.
 
 A few things are set up for you before your command runs:
 
-- **Your agent config comes with you.** If `~/.claude` exists on the host, it is mounted read-only at `/root/.claude`. Your agent identity, settings, and credentials are visible inside the container without being modifiable by it.
+- **Your agent config comes with you.** On the session-manager path, if `~/.claude` exists on the host it is mounted read-only at `/root/.claude`. Your agent identity, settings, and credentials are visible inside the container without being modifiable by it.
 - **Host binaries can be reused.** When launched by SCORPIOX CODE, the install directory is mounted read-only at `/opt/host-bin` and its binaries are linked into `/usr/local/bin`, so the container runs the same build you run on the host instead of downloading another copy. `TMUX_BIND_HOST_BINS` controls this on the session-manager path; the runtime itself does the mounting whenever it is given the directory.
 - **A clean, predictable environment.** Inside the container you get a standard `PATH`, `HOME=/root`, `USER=root`, `LANG=C.UTF-8`, your host's `TERM`, and a `container` variable set to `scorpiox-unshare` that scripts can use to detect they are inside the sandbox. Anything you pass with `-e` is applied on top.
 - **Working `/proc` and `/dev`.** A real `/proc` and `/sys`, device nodes for `null`, `zero`, `random`, `urandom` and `tty`, a private pseudo-terminal set, and a writable `/tmp` — enough that shells, package managers, and compilers behave as they do on the host. A synthetic random-entry substitute is provided when a kernel hides those files from user namespaces, so shell profiles do not complain.
@@ -180,17 +190,14 @@ When you run through the SCORPIOX CODE path you do not pass these flags by hand 
 | `TMUX_DEFAULT_DISTRO` | The default image for unshare sessions. Shipped as `agentcore-latest`. |
 | `TMUX_UNSHARE_EXTRA_ARGS` | Extra CLI arguments passed verbatim to `scorpiox-unshare` (e.g. `--persist /data -p 8080:8080`). |
 | `TMUX_UNSHARE_NET_MODE` | Network mode: empty = isolated (default), `host` = shared host networking. |
-| `TMUX_UNSHARE_VOLUME_MOUNT` | Explicit volume mount. Leave empty to auto-mount the project base paths. |
-| `TMUX_BIND_HOST_BINS` | Bind-mount the host's SCORPIOX CODE binaries into the container instead of re-downloading (default on). |
+| `TMUX_UNSHARE_VOLUME_MOUNT` | Explicit volume mount (`host:container`). Leave empty to auto-mount the project base paths. |
+| `TMUX_BIND_HOST_BINS` | Bind-mount the host's binaries into the container (default on — skips a download). |
 | `TMUX_BIND_USER_CONFIG` | Bind-mount `~/.claude` into the container read-only (default on). |
 | `TMUX_BIND_TOOLS` | Bind-mount a host tools directory at `/mnt/apps` read-only (default off). |
-| `TMUX_TOOLS_PATH` | The host directory used when `TMUX_BIND_TOOLS=1` (default `/root/tools`). |
+| `TMUX_TOOLS_PATH` | Host directory bound at `/mnt/apps` when `TMUX_BIND_TOOLS=1`. |
 | `TMUX_GUI_FOREGROUND` | On desktop images, run the agent in the foreground so it owns the pane (default on). |
-| `TMUX_GUI_VNC_PORT` | Publish the desktop's VNC port to a free host port so you can watch it (default `0` = off). |
+| `TMUX_GUI_VNC_PORT` | Publish the desktop's VNC port to a host port so you can watch it (default `0` = off). |
 | `TMUX_GUI_VNC_BIND` | Host address the published VNC port binds to (default all interfaces; set `127.0.0.1` on a shared network). |
-| `CONTAINER_PACKAGES` | Packages to auto-install on container start (default `none`). |
-| `IMAGE_BASE_URL` | Where images are downloaded from (default `https://dist.scorpiox.net/container-images/`). |
-| `SCORPIOX_HOME` | The runtime's home directory (default `~/.scorpiox`). |
 
 Volume mounts deserve one note: with `TMUX_UNSHARE_VOLUME_MOUNT` empty, the session manager mounts your project base paths into the container at the same paths they have on the host, so agent and host see the project in the same place. Set the key to a `host:container` pair to control it yourself.
 
@@ -204,6 +211,19 @@ TMUX_DEFAULT_DISTRO=agentcore-latest
 
 Everything else falls back to the shipped defaults, and every one of these keys also works as an OS environment variable or inside a named profile, exactly like the rest of the configuration cascade.
 
+### Environment variables the runtime itself reads
+
+A handful of variables are read directly by `scorpiox-unshare`, whether it was launched by SCORPIOX CODE or by hand:
+
+| Variable | Meaning |
+|----------|---------|
+| `SCORPIOX_HOME` | Runtime home directory (default `~/.scorpiox`). `--home` overrides it. |
+| `IMAGE_BASE_URL` | Where images are downloaded from (default `https://dist.scorpiox.net/container-images/`). |
+| `SX_NET_BACKEND` | `auto` (default), `system`, or `scorpiox` — which userspace network helper to use. |
+| `SX_PORT_BIND_ADDR` | Address a published port binds to (default `0.0.0.0`; set `127.0.0.1` to keep it on loopback). |
+| `CONTAINER_PACKAGES` | Comma-separated packages to install on first start (default `none`). |
+| `SCORPIOX_PERF` | `0` disables boot-timing output. |
+
 ---
 
 ## How it compares to Docker and podman
@@ -215,7 +235,7 @@ If you already know `docker` or `podman`, here is where `scorpiox-unshare` stand
 | **Daemon** | None — one process per container | A daemon is required and must be running | Rootless mode has no daemon, but the tooling around it is heavier |
 | **Requires root** | No — rootless by design | Docker Desktop: no, but it runs a Linux VM underneath; plain `dockerd`: yes | No, in rootless mode |
 | **Virtual machine** | No — kernel namespaces only | Docker Desktop on macOS and Windows: yes | No — kernel namespaces |
-| **External dependencies** | None in C; `slirp4netns` only for isolated networking | A large daemon, a container runtime, and a registry client | podman plus buildah, skopeo, and a container runtime |
+| **External dependencies** | None — pure C, with its own bundled userspace network helper | A large daemon, a container runtime, and a registry client | podman plus buildah, skopeo, and a container runtime |
 | **Image format** | `.tar` root filesystem / OCI layout | OCI / registry images | OCI / registry images |
 | **Startup** | A fraction of a second from the cached root filesystem | Fast, but daemon and image pull add up | Comparable to unshare in rootless mode |
 | **Footprint** | One small binary | Large — daemon, VM on non-Linux, registry client | Moderate |
@@ -226,16 +246,14 @@ If you already know `docker` or `podman`, here is where `scorpiox-unshare` stand
 
 **The honest limits.** It is not a general container platform, and it does not pretend to be. There is no `Dockerfile` builder and no multi-stage builds; images are pulled as root filesystems from a base URL rather than built and published through the registry ecosystem; there is no `compose`, no named networks, no volume objects — you get port publishing and bind mounts, and that is the whole surface. A `--memory` limit needs cgroup v2 with a writable cgroup tree on the host. GPU passthrough only exposes devices that exist on the host. If your real job is "run a containerized service with a build pipeline and a compose stack," use Docker or podman — that is what they are for. `scorpiox-unshare` is for the one thing it does exceptionally well: a fast, isolated, rootless Linux box for a command, with nothing else attached.
 
-The one soft dependency worth naming: **isolated networking uses `slirp4netns`**, a small userspace network tool. It is the only external piece the runtime ever reaches for, and only when you use the default isolated network. `--net host` skips it entirely; if it is missing, the runtime tells you plainly and fails fast rather than starting a container with a broken network.
+The networking story is now fully self-contained: isolated networking uses SCORPIOX CODE's own bundled userspace helper (`scorpiox-slirp4netns`), so there is nothing extra to install. If you prefer the system `slirp4netns` — or you have a minimal host where it is already present — set `SX_NET_BACKEND=system` to use it, or leave it on `auto` and let the runtime pick.
 
 ---
 
 ## A typical session, end to end
 
-Through SCORPIOX CODE:
-
 ```bash
-scorpiox-tmux                       # open the session dashboard
+# In the scorpiox-tmux dashboard:
 /new myapp                          # build the unshare session (downloads the image on first run)
 /watch myapp                        # watch it work (Esc to stop)
 /send myapp "git status"            # poke it without taking over the pane
@@ -259,19 +277,19 @@ Either way the container is built from the image, your project is mounted in, th
 
 - **The first launch is slow, the rest are fast.** The image is downloaded and unpacked once and cached under `~/.scorpiox`. If a session feels slow only on its very first run, that is the cache filling — not a problem.
 - **`-v` is overloaded by design.** `-v H:C[:ro]` is a volume mount, but `-v` alone (or `--version`) prints the version. The runtime tells the two apart by whether the next argument contains a `:`. Do not type `-v` followed by a path with no colon and expect a mount.
-- **`--net host` removes network isolation.** It is an escape hatch, not a default. If you set `TMUX_UNSHARE_NET_MODE=host`, you have opted out of the network boundary.
-- **`--privileged` is a security off-switch.** It disables the user namespace and grants real root, and only works when you are already root on the host. The runtime warns loudly. Treat it as "I have read the warning and I need it," not as a tuning knob.
+- **`--net host` removes network isolation.** It is a deliberate escape hatch, not a default. If you set `TMUX_UNSHARE_NET_MODE=host`, you have opted out of the network boundary.
+- **`--privileged` is a security off-switch.** It disables the user namespace and grants real root. The runtime warns loudly. Treat it as "I have read the warning and I need it," not a tuning knob.
 - **The container filesystem is ephemeral.** Writes to `/` do not persist across launches. Use `--persist`, `--bind`, or `-v` for anything you want to keep.
-- **`slirp4netns` is required for isolated networking.** If isolated networking is in play and the tool is not installed, the runtime fails fast with the install hint instead of starting a container that cannot reach the network.
-- **User namespaces must be enabled on the host.** Most modern kernels allow unprivileged user namespaces out of the box. If the runtime reports they are unavailable, the host has disabled them (for example an older `kernel.unprivileged_userns_clone` sysctl) and they need to be turned back on; the runtime prints the exact sysctl to set.
-- **Runs as real root? Then no user namespace.** If you start the runtime as root, it skips the user-namespace mapping — there is nothing for it to map. That is the correct, documented behavior, but it means a root-launched container is not rootless.
-- **It is Linux-only.** There is no `scorpiox-unshare` for plain Windows or macOS, because there are no Linux namespaces there. On those systems SCORPIOX CODE falls back to `native` mode (see [`scorpiox-tmux`](scorpiox-tmux.md)), or to `wsl` mode on Windows when WSL is installed.
+- **Isolated networking is self-contained by default.** The bundled `scorpiox-slirp4netns` helper ships next to the runtime, so nothing needs to be installed. The only way isolated networking fails is on a host where neither the bundled helper nor a system `slirp4netns` is present; the runtime fails fast with a clear message rather than starting a container that cannot reach the network.
+- **User namespaces must be enabled on the host.** Most modern kernels allow unprivileged user namespaces by default. If the runtime reports they are unavailable, the host has disabled them (for example an older `kernel.unprivileged_userns_clone` sysctl) and they need to be turned on; the runtime prints the exact sysctl to set.
+- **Runs as real root? Then no user namespace.** If you start the runtime as root it skips the user-namespace mapping — there is nothing for it to map. That is the correct, documented behavior, but it means a root-launched container is not rootless.
+- **It is Linux-only.** There is no `scorpiox-unshare` for plain Windows or macOS — there are no Linux namespaces there. On those systems SCORPIOX CODE falls back to `native` mode (see [`scorpiox-tmux`](scorpiox-tmux.md)); on Windows, `wsl` mode when WSL is installed.
 
 ---
 
 ## The bottom line
 
-`scorpiox-unshare` is the reason SCORPIOX CODE can hand every agent an isolated Linux environment without asking you to install or run anything first. It is a pure-C, rootless container runtime that leans on the kernel's namespaces for isolation, pulls a root filesystem image when it needs one, and starts a container in a fraction of a second with no daemon, no VM, and no external machinery. It is the default under your SCORPIOX CODE sessions, and it is also a standalone tool: point `<image> <command>` at anything and you get a disposable, isolated Linux box to run it in.
+`scorpiox-unshare` is the reason SCORPIOX CODE can hand every agent an isolated Linux environment without asking you to install or run anything. It is a pure-C, rootless container runtime that leans on the kernel's namespaces for isolation, pulls a rootfs image when it needs one, ships its own userspace network helper, and starts a container in a fraction of a second with no daemon, no VM, and no external machinery. It is the default under your SCORPIOX CODE sessions, and it is also a standalone tool: point `<image> <command>` at anything and you get a disposable, isolated Linux box to run it in.
 
 ---
 
