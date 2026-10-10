@@ -4,7 +4,7 @@ Reasoning effort is the dial that tells a reasoning model how hard to think befo
 
 The reason there are two surfaces is that the three providers which read reasoning effort do not agree on their key names, their accepted values, or even what "off" means. The slash command is the universal control; the per-provider keys are how you pin it per provider in the configuration cascade.
 
-Docs for SCORPIOX CODE @ `77c49df`.
+Docs for SCORPIOX CODE @ `e30b171`.
 
 > **The whole idea in one line:** `/reasoning_effort <low|medium|high|max|off>` changes reasoning effort for the running session on any provider that supports it, and the `*_REASONING_EFFORT` config keys make the same choice permanent — with each provider reading its own key first, then the generic fallbacks.
 
@@ -51,9 +51,9 @@ This is the part that actually matters, because the three providers disagree.
 
 The details behind that table:
 
-**openai** (`PROVIDER=openai` — llama.cpp, vLLM, SGLang, Ollama, LM Studio, Azure, any OpenAI-compatible endpoint). When `OPENAI_REASONING_EFFORT` is non-empty, SCORPIOX CODE injects it into the request as `reasoning_effort`. Engines that understand the field use it; engines that do not ignore it harmlessly. `max` is passed through verbatim — it is up to your engine to accept or reject it, which makes `max` the value to use for local reasoning builds that support extended effort levels. There is exactly one key and no fallback: what you set is what goes out.
+**openai** (`PROVIDER=openai` — any OpenAI-compatible endpoint, cloud or self-hosted). The provider reads `OPENAI_REASONING_EFFORT` and passes it straight through as the `reasoning_effort` field in the Chat Completions body. Whether it has any effect is up to the server on the other end: engines that understand the field act on it, engines that ignore it silently drop it. Only the four levels are offered; there is no `off` value here because an empty key already means "do not send the field", which is the same thing. This is the provider where the slash command and the config key are exactly the same wire effect — the command's write to `OPENAI_REASONING_EFFORT` *is* the provider's first-choice key, so the two never disagree.
 
-**codex** (`PROVIDER=codex` — ChatGPT/Codex subscription). The Codex provider maps your value onto the Responses API's reasoning field, and it is the one provider where `off` is a *sent* value: `off` (or `none`, or `0`) becomes `reasoning: { effort: "none" }` on the wire. `low`, `medium`, `high`, and `max` pass through directly. If no reasoning key is set at all, the provider falls back to its thinking toggle: with `THINKING=1` (the shipped default) the request carries `high`. So on Codex, out of the box, you are already running at `high` — set a key only to change it.
+**codex** (`PROVIDER=codex` — ChatGPT/Codex subscription). The Codex provider maps your value onto the Responses API's reasoning field, and it is the one provider where `off` is a *sent* value: `off` (or `none`, or `0`) becomes `reasoning: { effort: "none" }` on the wire. `low`, `medium`, `high`, and `max` pass through directly, and any other value is passed through verbatim rather than rejected. If no reasoning key is set at all, the provider falls back to its thinking toggle: with `THINKING=1` (the shipped default) the request carries `high`. So on Codex, out of the box, you are already running at `high` — set a key only to change it.
 
 **copilot** (`PROVIDER=copilot` — GitHub Copilot subscription). The Copilot endpoint accepts `low`, `medium`, `high`, and here `off` (or `none`, or `0`) means **omit the field** — the provider's default thinking behavior applies, which is not the same as Codex's explicit `none`. One model-specific wrinkle: if the selected model is a Gemini model, `max` is mapped down to `high` before sending, because the Copilot surface for Gemini models does not accept `max`. On Claude-family Copilot models `max` passes through as-is.
 
@@ -93,9 +93,7 @@ What `/reasoning_effort` actually does is two writes, both in the running proces
 1. It sets the shared key in the in-memory configuration.
 2. It sets the matching OS environment variable (`OPENAI_REASONING_EFFORT=low`) in the process.
 
-The second write is why the command is authoritative for the rest of the session: **an OS environment variable outranks every file in the cascade**. If your user-level `scorpiox-env.txt` says `OPENAI_REASONING_EFFORT=high` and you run `/reasoning_effort low`, the session-level `low` wins for as long as this process lives. And that is also the trap:
-
-> **The slash-command setting evaporates on restart.** It is an environment variable of a running process, not a file. Restart SCORPIOX CODE and the cascade resolves again — your file value (or nothing) applies. If the value you just tried is the one you want to keep, persist it before you lose it.
+The second write is why the command is authoritative for the rest of the session: **an OS environment variable outranks every file in the cascade**. If your user-level `scorpiox-env.txt` says `OPENAI_REASONING_EFFORT=high` and you run `/reasoning_effort low`, the session-level `low` wins for as long as this process lives. And that is also the trap: the change lives and dies with the process. Restart the session and the file value comes back.
 
 Making it permanent, in the tier that matches how widely you want it:
 
@@ -173,10 +171,7 @@ All five keys resolve through the standard cascade — global, user, project, pr
 
 - **`off` means three different things.** openai: omit the field. codex: send explicit `none`. copilot: omit the field and accept provider-default thinking. None of them means "the model spent zero effort" — they mean "SCORPIOX CODE stopped specifying".
 - **The slash command writes the shared key, so provider-specific keys silence it.** `CODEX_REASONING_EFFORT` set anywhere in your cascade beats `/reasoning_effort` for the Codex provider. Check `scorpiox-config --verbose` when a slash-command change seems ignored.
-- **The slash-command setting is wiped by restart.** It lives in the process environment. Persist the value with the config editor or `scorpiox-config --set` if you want it to survive.
-- **Conversely, the session value beats your files.** Because the command sets a real OS environment variable, a file that says `high` loses to a session that says `low` until the process exits. Don't hunt for a config bug that is actually your own earlier slash command.
-- **`max` is provider-dependent.** Passed through on openai and codex; on copilot it silently becomes `high` for Gemini-family models and passes through for Claude-family models.
-- **`REASONING_EFFORT` is not in the editor.** It works from files and profiles only. If you set it and it "does nothing", check that no provider-specific key is also set — those are checked first.
+- **Live changes do not survive a restart.** The slash command writes an OS environment variable for the process; the next session re-reads the files. Persist with `scorpiox-config --set` (or the editor) when you want it to stick.
 - **Empty beats unset in surprising ways.** The chain checks are "is it non-empty", not "is it present". A key set to empty string is treated as unset and the chain moves on — which is exactly what `/reasoning_effort off` relies on.
 
 ---

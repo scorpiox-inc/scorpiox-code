@@ -4,7 +4,7 @@ You have an **OpenCode Zen** subscription, or you have access to OpenCode's free
 
 This page walks through the **device-code login**, how the token is stored and resolved, how to turn the provider on with a profile, how the free-tier tool gate works, how to switch models and accounts (`/profile` and `/use`), how to inspect your account and model list, how to drive a login without a TTY (**machine mode**), and how direct OpenCode access differs from standard API-key usage.
 
-Docs for SCORPIOX CODE @ `13253cf`.
+Docs for SCORPIOX CODE @ `e30b171`.
 
 ---
 
@@ -170,6 +170,8 @@ Run it before a long session to confirm the token resolves to the account and or
 | `remote` | Fetch from an HTTP endpoint (`OPENCODE_REMOTE_URL`) |
 
 For a personal subscription, `local` is all you need. The `tcp` and `remote` sources exist for shared token-server setups — one machine holds the login, a fleet of agents pulls fresh tokens from it — and are not needed for a normal OpenCode login.
+
+> **Shared token sources require their own configuration.** Unlike a personal `local` login, `tcp` and `remote` do not assume anything about your infrastructure. A `tcp` profile must set `TCP_HOST`, `TCP_PORT`, and `TCP_API_KEY`; a `remote` profile must set `OPENCODE_REMOTE_URL` and `TOKEN_HTTP_API_KEY`. If one is missing, `scorpiox-opencode-fetchtoken` stops and names the exact key to set rather than silently trying a default host — so a misconfigured fleet source fails loudly, and no one's endpoint assumptions are baked into the app.
 
 ### Token lifetime, refresh, and re-login
 
@@ -410,7 +412,7 @@ All of them use the same device-code login pattern, the same credential-file con
 | A 403 with a tool-related error on a free model | The free-tier tool gate did not see `bash` and `read`. Confirm `TOOLS` and the per-tool switches are at their defaults, and that `OPENCODE_FREE_TIER_TOOLS` is `0` unless you deliberately set it. |
 | Wrong organization on requests | Set `OPENCODE_ORG_ID` in your profile to the org you want, or re-run `scorpiox-opencode-login` and approve under the right org. |
 | Token expired / repeated authorization errors | Re-run `scorpiox-opencode-login` for a fresh token. The device flow reissues everything, including the profile. |
-| `OPENCODE_TOKEN_SOURCE=tcp` or `remote` failing | Check `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` or `OPENCODE_REMOTE_URL`, then test with `scorpiox-opencode-fetchtoken -tcp` or `-remote` to isolate the token server. |
+| `OPENCODE_TOKEN_SOURCE=tcp` or `remote` failing | Check `TCP_HOST` / `TCP_PORT` / `TCP_API_KEY` or `OPENCODE_REMOTE_URL` / `TOKEN_HTTP_API_KEY`, then test with `scorpiox-opencode-fetchtoken -tcp` or `-remote` to isolate the token server. A missing key reports its own name before any request is sent. |
 | Model not found | Run `scorpiox-opencode-models` to see what your account actually exposes. Free models are always there; paid models depend on your plan. |
 | Your `OPENCODE_TOKEN` "will not go away" | The environment beats the config cascade. Check for an exported `OPENCODE_TOKEN` before assuming the profile is wrong. |
 | Machine-mode login stuck at `pending` | The code expired or was never approved. Run `--cancel`, then `--start` again for a fresh code. |

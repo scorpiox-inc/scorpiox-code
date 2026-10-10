@@ -1,426 +1,347 @@
 # Serving Sites with scorpiox-server
 
-You want to put a site or an API on a box. The traditional answer is a stack: a web server that only proxies, an application runtime it hands work to, an auth middleware package, a deployment pipeline, and a reverse-proxy config so TLS terminates somewhere sensible. Each layer is a product with its own config language, and every new site means wiring all of them together again.
+`scorpiox-server` is SCORPIOX CODE's built-in HTTP server. Point it at a folder — or at a git repository — and every file in it becomes a route: a Python script or a compiled native executable that answers a URL. There is no framework to bootstrap, no runtime to install beside it, and no separate web root to keep in sync. The routing *is* the file layout, and a deploy is a `git push`.
 
-SCORPIOX CODE ships a different answer: **`scorpiox-server`**, a single native binary that is the web server *and* the application runtime *and* the auth gate *and* the deployment mechanism. The routing is your file layout. A `git push` deploys. JWT validation is a config key. And every page you build serves two audiences at once — HTML for the human in the browser, JSON for the machine in the loop.
+This page is the operator's guide: how routes resolve, what a script receives, how the HTML-plus-JSON contract works, how to deploy from git, every configuration key and default, JWT authentication, MCP mode, and the reverse-tunnel mesh that lets a node behind NAT join a hub without opening a port.
 
-This is the same server that powers the product's own public website, and the same one SCORPIO BOT supervises as its API tier. It runs sites in production every day.
+Docs for SCORPIOX CODE @ `e30b171`.
 
-Docs for SCORPIOX CODE @ `ad926d7`.
-
-> **The whole idea in one line:** drop `scorpiox-server` next to a folder of Python scripts or native executables, and the file names become the routes — with a mandatory HTML + JSON contract on every page, git-push deployment, built-in JWT authentication, optional static-file serving, per-script response streaming, an MCP mode that turns your scripts into agent tools, and a reverse-tunnel mesh for sites that live behind NAT — all in one zero-dependency binary.
+> **The whole idea in one line:** one zero-dependency native binary serves Python and compiled handlers as web routes, deploys them by git push, enforces JWT auth in the server itself, and can expose the same scripts as MCP tools or tunnel them out through a hub — where the routing, the deployment, and the auth are the file layout, one flag, and one secret.
 
 ---
 
-## The mental model: routing is the file layout
+## What it is, and what it is not
 
-There is no route table to maintain. Give the server a script directory and a URL prefix, and every executable or `.py` file in that directory becomes a route whose name is the file name:
+`scorpiox-server` is a small, self-contained HTTP server. It listens on a port, accepts requests, and for each request decides which script should answer it, runs that script as a child process, and streams the script's output back as the HTTP response. A handler can be:
 
-```
-/var/site/
-  index.py        ->  GET  /                     (the front page)
-  install.py      ->  GET  /install
-  api-reference.py -> GET  /api-reference
-  _fallback.py    ->  *    (everything else)
-```
+- a **Python script** — `name.py`, run with the system `python3` interpreter; or
+- a **native executable** — `name` on Linux and macOS, `name.exe` on Windows.
 
-Hit `/{prefix}{name}` and the server finds a handler named `name`: a **native executable** first (a file with the execute bit set on Unix, `name.exe` on Windows), then a **`name.py`** script run by `python3`. With multiple directories configured, they are searched in order and the first match wins — useful for a shared library of scripts shadowed by site-specific overrides. Name conflicts between directories are detected and reported at startup.
+Native handlers are checked first, then Python scripts. Because each handler is a process, a slow or crashed route never takes the server down with it, and one route's memory is not another's.
 
-A few conventions make the whole system work:
-
-- **`index` is the default page.** A request to the bare prefix (with or without the trailing slash) runs `index` or `index.py`.
-- **`_fallback` is the catch-all.** When no script matches, the server runs `_fallback` or `_fallback.py` — your 404 page, your dynamic router, whatever you want. The product's own website uses a single `_fallback.py` that routes `/tools/{name}` pages and renders 404s.
-- **The route namespace is flat.** Names may contain letters, digits, `-`, `_`, and `.` — but not `/`. There are no subdirectories in routing. Scripts that need internal paths (like a docs tree) read `PATH_INFO` and route inside themselves.
-- **Traversal is blocked twice.** Names containing `..` are rejected, and every resolved file is verified to actually live inside its script directory before anything executes.
-
-If no script matches, there is no fallback, and no static file is found, the request gets a clean `404` with a JSON error body.
+What it is **not**: it is not a reverse proxy, a load balancer, or a TLS terminator. It speaks plain HTTP and expects a TLS terminator to sit in front of it when a route crosses a network. It also does not ship a template language, ORM, or session store — those are the script's business. The server's job is routing, process execution, the request environment, and access control.
 
 ---
 
-## Start it
+## Routes: the file layout is the routing table
+
+A request path is mapped to a handler name under the route prefix. With the default prefix `/api/platform/websites/`:
+
+| Request | Handler |
+|---------|---------|
+| `GET  {prefix}foo` | runs `foo` (native) or `foo.py` |
+| `POST {prefix}foo` | same handler, with the request body available |
+| `GET  {prefix}` | runs `index` or `index.py` (the default page) |
+| any unmatched path | runs `_fallback` or `_fallback.py`, if present |
+| `GET  /favicon.ico` | the configured favicon, if one is set |
+| `GET  /api/ping` | health check — returns `ok` |
+| `GET  /api/otp?a=NAME&s=SECRET` | generates a TOTP (JSON) |
+| `POST /mcp` | MCP tools endpoint, when MCP mode is on |
+| `GET  /ws/join`, `GET /mesh/nodes`, `/node/<id>/…` | the mesh hub, when running as a hub |
+
+The route prefix is `SERVER_ROUTE_PREFIX`, default `/api/platform/websites/`. Set it to `/` for clean site URLs at the domain root. **In git deploy mode the prefix defaults to `/`** unless you configure one explicitly, so a pushed site answers at its own root out of the box.
+
+Handler names may contain letters, digits, `-`, `_`, and `.`; a name containing `..` is refused as a traversal attempt. When several script directories are configured they are searched in order and the **first match wins**; if the same handler name exists in two directories the server prints a conflict warning at startup so you are never surprised about which one is live.
+
+The HTTP method itself is delivered to the handler in `REQUEST_METHOD`, so a script can branch on it. The documented site convention is GET for reads and POST for writes. An `OPTIONS` request is handed to a handler named `options` (or to `_fallback`) when one exists — useful for CORS preflight — and answered directly with `204 No Content` when none does. Every response carries permissive CORS headers, so a browser client on another origin can call the site without extra configuration.
+
+---
+
+## The HTML + JSON contract
+
+Every page a site serves should answer **two audiences through one URL**: a browser that wants HTML and a machine that wants structured data. The convention is a query parameter — add `?format=json` and the same route returns JSON instead of HTML.
+
+This is not a server switch; it is a design requirement of the sites you build on the server. Query parameters arrive at the handler as environment variables named after the key, so `?format=json` reaches the script as the variable `format` with the value `json`, and the script decides what to emit. That is what makes a route usable by a human in a browser and a model in a loop without a second endpoint or a second handler.
+
+The same pattern is used throughout SCORPIOX CODE's own web surfaces: the fleet dashboard and its API speak one dialect where every route accepts `?format=json`, so a browser and a bot can hit the identical URL. Treat it as mandatory for your own pages too — it costs one `if` in the handler and buys a machine-readable mode for free.
+
+Two mechanics make it work cleanly:
+
+- **Query parameters are exported as environment variables** named after the key (`?name=x` → `name=x`). Only safe names are exported: letters, digits, and underscores, not starting with a digit, containing at least one lowercase letter, and never a proxy variable or an existing variable. A request cannot use a query string to overwrite `PATH`, a proxy setting, or anything the operator set.
+- **The handler emits CGI-style headers** at the top of its output — `Status:`, `Content-Type:`, and any others (`Location`, `Set-Cookie`) — followed by a blank line and the body. If no `Content-Type` is given, the response is `text/html`.
+
+So a handler that serves a human page and a JSON API looks, in outline, like this:
+
+```python
+import os, json
+fmt = os.environ.get("format", "html")
+if fmt == "json":
+    print("Content-Type: application/json")
+    print()
+    print(json.dumps({"status": "ok"}))
+else:
+    print("Content-Type: text/html")
+    print()
+    print("<h1>Hello</h1>")
+```
+
+---
+
+## What a handler receives
+
+A handler runs as a child process with the working directory set to its script directory, and with a deliberately narrow environment. That environment is where the request arrives.
+
+| Variable | Meaning |
+|----------|---------|
+| `REQUEST_METHOD` | `GET`, `POST`, and so on |
+| `QUERY_STRING` | the raw query string |
+| `PATH_INFO` | the request path |
+| `CONTENT_TYPE` | the request `Content-Type` |
+| `CONTENT_LENGTH` | the request body length, when known |
+| `HTTP_COOKIE` | the raw `Cookie` header |
+| `HTTP_AUTHORIZATION` | the raw `Authorization` header |
+| `HTTP_*` | every other request header, CGI-style (`X-Custom` → `HTTP_X_CUSTOM`) |
+| *`key=value`* | each safe query parameter, named after its key |
+| `POST_BODY_FILE` | path to a temp file holding a small POST body (see below) |
+| `SX_STREAMING` | `1` when the response is being streamed (see below) |
+
+**Request bodies.** A small POST body (under 512 KB) is written to a temporary file and passed as `POST_BODY_FILE`, so a handler reads it like any file and the body never sits in a shell. A large body — over 512 KB, or any chunked body — is streamed to the child's standard input in chunks and never buffered whole, so a big upload does not consume memory proportional to its size. On the streaming path there is no `POST_BODY_FILE`; the script reads standard input instead, and `SX_STREAMING=1` is set.
+
+**Responses.** The server reads the handler's standard output, parses the leading headers, and forwards them with the body. If the handler streams a response (an MCP tool call, a large answer, a server-sent event stream), the server relays it as it is produced. A handler that emits `Content-Type: text/event-stream` gets live server-sent events relayed to the browser with caching disabled — no polling, no buffering.
+
+**Timeouts.** A handler has an idle timeout — `SERVER_SCRIPT_TIMEOUT`, default **300 seconds** — measured as time with no output, not total runtime. A script that keeps producing output keeps running; one that goes quiet for the full window is reaped.
+
+---
+
+## Deploying from git
+
+The fastest way to ship a site is to let the server own a clone of your repository:
 
 ```bash
-scorpiox-server                     # default/configured port (8080)
-scorpiox-server -p 3000             # specific port
-scorpiox-server -e SERVER_SCRIPT_DIR=/var/site -e SERVER_ROUTE_PREFIX=/
-scorpiox-server -r https://git.example.com/org/site.git   # git deploy mode
-scorpiox-server -h                  # full help
+scorpiox-server -r https://git.example.com/team/site.git
+scorpiox-server -r https://git.example.com/team/site.git -b staging     # track a branch
+scorpiox-server -r https://git.example.com/team/site.git --poll 5        # poll every 5s
 ```
 
-`-e KEY=VAL` overrides any configuration key for this process — repeatable, and values for sensitive keys (secrets, tokens) are masked in the startup log. Configuration otherwise comes from the same `scorpiox-env.txt` cascade the rest of SCORPIOX CODE uses (see [Configuration and Profiles](scorpiox-env.md)), so a server and your agent share one configuration story.
+At startup the server clones the repository into its cache and serves the working tree. It then polls in the background: it asks the remote what the branch head is, compares that to the local head, and when they differ it fetches and hard-resets to the new commit. **Your deploy is a `git push`** — the server picks up the change on the next poll.
 
-On startup the server prints its banner: port, PID, request/response limits, the route prefix, and each script directory with an accessibility check. Missing directories are warned about; a server with no accessible directories refuses to start rather than serve 404s.
+| Key / flag | Default | Meaning |
+|------------|---------|---------|
+| `-r`, `--repo <url>` | *(off)* | Clone and serve from this repository |
+| `-b`, `--branch <name>` | `main` | Branch to track |
+| `--poll <seconds>` | `10` | Poll interval (`SERVER_GIT_POLL_INTERVAL`) |
+| `SERVER_GIT_PAT` | *(empty)* | Personal access token for private clones/fetches |
+| `SERVER_GIT_CACHE_DIR` | platform cache dir | Where the clone lives |
+
+When `SERVER_GIT_PAT` is set it is embedded into HTTPS clone and fetch URLs so private repositories work without an interactive credential prompt. If the token would appear in a log line it is masked. The cache directory defaults to `$XDG_CACHE_HOME/scorpiox-server`, then `~/.cache/scorpiox-server`, and finally a private per-user path under the system temp directory; the clone itself lands in `<cache>/<repo-name>`. Clones are shallow — depth 1 — which keeps startup fast; the poll loop brings you forward, not backward.
+
+Note the routing default in this mode: unless you set `SERVER_ROUTE_PREFIX` yourself, git deploy mode serves at `/`, so a repository whose top level holds `index.py`, `about.py`, and `style.css` answers as a normal website.
 
 ---
 
-## The dual contract: HTML for humans, JSON for machines
+## Configuration reference
 
-This is a requirement of sites built on the server, not a nice-to-have: **every page must answer a browser and a machine from the same URL.** Humans get HTML. Automation, agents, monitors, and other tools get JSON they can consume without scraping. The HTML view is what a person reads; the JSON view is what makes the same page actionable in a loop — one URL, both audiences, no scraping layer in between.
+Every setting below is a `KEY=VALUE` pair resolved through the standard SCORPIOX CODE configuration cascade — defaults, then a global file, then your user file, then the project file, then the active profile, then the OS environment. See [Configuration and Profiles](scorpiox-env.md) for how the tiers combine and which file to edit.
 
-The product's own site does exactly this. The landing page serves rendered HTML to a browser and a plain-text installer script to PowerShell (user-agent sniffing at the CGI layer). The `/version` endpoint answers JSON. A Swagger UI route serves interactive HTML at `/swagger` and the same API surface as a machine-readable OpenAPI document at `/swagger/v1/swagger.json`. SCORPIO BOT's API takes it further with an explicit `?format=json` switch on every route, so a human in the dashboard and a script in a loop use identical URLs.
+### Server core
 
-Your scripts implement the contract however suits the page — content negotiation on the `Accept` header, a `?format=json` query parameter, a parallel `/api/...` route — but build it in from the first commit. Retrofitting "make this page machine-readable" onto an HTML-only site is the mistake this contract exists to prevent. An agent that can read your site is an agent that can act on it.
+| Key | Default | Description |
+|-----|---------|-------------|
+| `SERVER_PORT` | `8080` | Listening port. The `-p` flag overrides it. |
+| `SERVER_ROUTE_PREFIX` | `/api/platform/websites/` | Prefix stripped before a path becomes a handler name. Git deploy mode defaults to `/`. |
+| `SERVER_SCRIPT_DIR` | `./scripts` | Comma-separated handler directories, up to 16. First match wins. |
+| `SERVER_STATIC_ROOT` | *(off)* | Serve unmatched GET/HEAD paths as static files from here. Handlers always take priority. |
+| `SERVER_MAX_REQUEST_MB` | `200` | Largest request body accepted, streamed rather than buffered. |
+| `SERVER_MAX_RESPONSE_MB` | `200` | Largest buffered response body. |
+| `SERVER_SCRIPT_TIMEOUT` | `300` | Handler idle timeout, in seconds with no output. |
+| `SERVER_STREAM_SCRIPTS` | *(off)* | Comma-separated handler names whose responses are streamed with no size cap (idle timeout only). Unix only. |
+| `SERVER_IP_WHITELIST` | *(off)* | Comma-separated IPs and CIDR ranges. Empty allows every client. |
+| `SERVER_FAVICON` | *(off)* | A base64 favicon or a path to an image file, served at `/favicon.ico`. |
 
----
+The server binds all interfaces and handles requests with a forked child per request on Linux and macOS, and a thread per request on Windows. The whitelist, when set, is checked against the first client address it can find — `X-Forwarded-For` first, then `X-Real-IP`, then the socket peer — so it works correctly behind a proxy that sets either header; once a header is present its address is authoritative, so a client cannot bypass the list by also connecting from a trusted peer. An entry is a plain address (`203.0.113.7`) or a range (`10.0.0.0/8`). A blocked request gets `403 Forbidden`.
 
-## What a script receives: the CGI environment
+Static serving, when `SERVER_STATIC_ROOT` is set, resolves directories to `index.html`, rejects any path containing `..` or resolving outside the root (including through a symlink), and sets `Cache-Control: no-store` so a git-pushed site never serves a stale asset. Handlers always win over static files, so turning this on cannot shadow an existing route.
 
-Scripts run in a full CGI environment. The server sets everything a standard CGI program expects, plus its own additions:
+### Git deploy
 
-| Variable | What it carries |
-|----------|-----------------|
-| `REQUEST_METHOD` | The HTTP method, passed through as-is (`GET`, `POST`, and any other method) |
-| `CONTENT_TYPE` / `CONTENT_LENGTH` | The request body's type and size |
-| `QUERY_STRING` | The raw query string, URL-decoded |
-| `PATH_INFO` | The full request path |
-| `HTTP_COOKIE` / `HTTP_AUTHORIZATION` | Those headers, verbatim |
-| `HTTP_*` | Every other request header, uppercased with `-` → `_` (so `User-Agent` becomes `HTTP_USER_AGENT`) |
-| `POST_BODY_FILE` | Path to a temp file holding the POST body (buffered mode) |
-| `SX_STREAMING` | Set to `1` when the body is being streamed (see below) |
-| query parameters | **Each safely named query parameter becomes its own environment variable** — `?platform=linux` arrives as `platform=linux` |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `SERVER_GIT_CACHE_DIR` | platform cache dir | Directory holding the clone. |
+| `SERVER_GIT_POLL_INTERVAL` | `10` | Poll interval in seconds. |
+| `SERVER_GIT_PAT` | *(empty)* | Token embedded into HTTPS clone and fetch URLs. |
 
-The query-parameter-to-environment mapping is the workhorse: a script reads `os.environ.get('platform')` and never parses a query string. The product's own install router does exactly this — one `?platform=` parameter, read straight out of the environment.
+### Authentication
 
-**Query parameters are filtered, and never overwrite anything.** A request must not be able to redefine the environment a handler runs in, so only parameters whose names are `[A-Za-z0-9_]`, start with a non-digit, and contain at least one lowercase letter are exported — and only when the name is not already set. Real parameters (`name`, `ref`, `token`, `dataBase64`) pass; all-uppercase names like `PATH`, `LD_PRELOAD`, `GIT_ORG`, `HTTP_AUTHORIZATION`, `REQUEST_METHOD`, or `POST_BODY_FILE` are dropped, as are the lowercase proxy variables (`http_proxy`, `https_proxy`, and friends). An operator's own `-e` value can never be clobbered by the request. If you need to pass an all-uppercase identifier through, send it in a POST body instead of the query string.
+| Key | Default | Description |
+|-----|---------|-------------|
+| `SERVER_JWT_SECRET` | *(empty)* | HMAC-SHA256 secret. A leading `/` or `./` is treated as a file path; anything else is an inline secret. Empty disables server-side JWT validation. |
+| `SERVER_JWT_ISSUER` | *(empty)* | Expected `iss` claim. Empty skips the check. |
+| `SERVER_JWT_AUDIENCE` | *(empty)* | Expected `aud` claim. Empty skips the check. |
+| `SERVER_JWT_COOKIE` | *(empty)* | Cookie name to read a token from, after the `Authorization` header. Empty means header-only. |
+| `SERVER_JWT_CLAIMS` | *(empty)* | Extra `claim=ENV_VAR` mappings, comma-separated. |
+| `SERVER_JWT_PROTECT` | *(empty)* | Comma-separated route prefixes that require a valid token. Empty means no enforcement. |
+| `SERVER_JWT_PUBLIC` | *(empty)* | Comma-separated prefixes exempt from `SERVER_JWT_PROTECT`. Matches whole path segments. |
+| `SERVER_JWT_LOGIN_URL` | *(empty)* | Where a browser hitting a protected route is redirected when unauthenticated. |
 
-POST bodies are handled in one of two ways:
+### MCP server mode
 
-- **Buffered (bodies up to 512 KB):** the body is written to a temp file and exported as `POST_BODY_FILE`, and also piped to the script's stdin.
-- **Streamed (larger bodies, or chunked requests):** the body streams straight from the socket to the script's stdin with no temp file and no buffering, with `SX_STREAMING=1` set. A 1 MB upload round-trips through this path byte-for-byte — the mesh test suite verifies exactly that with a SHA256 equality check.
+| Key | Default | Description |
+|-----|---------|-------------|
+| `MCP_SERVER_NAME` | `scorpiox-server` | Name advertised in the MCP handshake. The `--name` flag overrides it. |
+| `MCP_TOOL_EXCLUDE` | *(empty)* | Comma-separated glob patterns for handlers that must not become MCP tools. |
+| `SERVER_SCRIPT_TIMEOUT` | `300` | Also the idle timeout for one tool call. |
+| `SERVER_MAX_RESPONSE_MB` | `200` | Also caps captured tool output. |
 
-The script's working directory is its own directory. stdout and stderr are merged. The script's stdout becomes the HTTP response.
+### Mesh and hub
 
----
+| Key | Default | Description |
+|-----|---------|-------------|
+| `SERVER_MESH_HUB` | `0` | Run as a mesh hub (equivalent to `--hub`). |
+| `SERVER_MESH_CONNECT` | *(empty)* | Worker hub URL to dial (equivalent to `--connect`). |
+| `SERVER_MESH_ID` | hostname | Node id advertised to the hub. |
+| `SERVER_MESH_KEY` | *(empty)* | Pre-shared mesh key for a self-hosted hub. |
+| `SERVER_MESH_TOKEN` | *(empty)* | Scorpio+ JWT for the worker. |
+| `SERVER_MESH_CA_FILE` | *(system store)* | CA bundle for `wss://` hub URLs. |
+| `SERVER_MESH_INSECURE` | `0` | Skip TLS certificate verification (equivalent to `--insecure`). |
+| `SERVER_MESH_TIMEOUT` | `300` | Tunnel request timeout, in seconds. |
 
-## What a script sends back
+### Command-line reference
 
-Script output is CGI: optional headers, a blank line, then the body.
+| Flag | Effect |
+|------|--------|
+| `-h`, `--help` | Print the built-in help. |
+| `-p <port>` | Listen on this port. |
+| `-e KEY=VALUE` | Override any configuration key for this run (repeatable). |
+| `-r`, `--repo <url>` | Enable git deploy mode. |
+| `-b`, `--branch <name>` | Track this branch (default `main`). |
+| `--poll <seconds>` | Git poll interval. |
+| `--mcp` | Serve handlers as MCP tools over HTTP. |
+| `--name <name>` | MCP server name. |
+| `--hub` | Run as a mesh hub. |
+| `--connect`, `--join <url>` | Run as a mesh worker dialing this hub. |
+| `--id <node-id>` | Mesh node id. |
+| `--key <psk>` | Pre-shared mesh key. |
+| `--token <sx_token>` | Scorpio+ JWT for the worker. |
+| `--insecure` | Skip TLS verification for a `wss://` hub. |
 
-```
-Content-Type: text/html; charset=utf-8
-Status: 200 OK
-
-<html>...
-```
-
-- `Status:` sets the HTTP status code (values outside 100–599 fall back to 200).
-- `Content-Type:` sets the response type (default `text/html`).
-- Everything else — `Location:`, `Set-Cookie:`, your own headers — is forwarded to the client. Redirects and cookies are pure script territory.
-- If the output has no recognizable CGI header block, the whole output is served as `text/html` with status 200. A script that just prints HTML works with zero ceremony.
-
-Responses also carry permissive CORS headers on every reply (`Access-Control-Allow-Origin: *`, all methods, all headers, credentials allowed), so browser-based clients on other origins work without extra configuration. Tighten this at a TLS-terminating proxy if your deployment needs stricter origins.
-
-**Streaming (SSE):** if a script declares `Content-Type: text/event-stream`, the server switches from buffering to streaming — each `data:` chunk is forwarded the moment the script flushes it, on all platforms. Server-sent events, live logs, progress feeds, token-by-token output: write a normal script that flushes, and the client gets it live. SSE streams are subject to the idle timeout (below), not a total-duration cap — a stream that keeps producing can run as long as it keeps producing.
-
----
-
-## Limits and lifecycle
-
-These keys govern resource behavior:
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `SERVER_MAX_REQUEST_MB` | `200` | Maximum request body size |
-| `SERVER_MAX_RESPONSE_MB` | `200` | Maximum buffered script output (a buffer cap, not a streaming cap) |
-| `SERVER_SCRIPT_TIMEOUT` | `300` | **Idle** timeout — seconds with no stdout activity |
-| `SERVER_STREAM_SCRIPTS` | *(empty)* | Script base names whose responses are streamed instead of buffered (Unix only) |
-
-The timeout is idle-based, not wall-clock: the deadline resets on every chunk the script produces. A report that streams progress for an hour is fine; a script that hangs silently for 300 seconds is killed (`SIGTERM`, then `SIGKILL` after a 100 ms grace) and whatever output was captured is returned. Bump `SERVER_SCRIPT_TIMEOUT` for scripts with long silent phases — SCORPIO BOT raises it to 900 seconds for exactly that reason.
-
-Concurrency is a process per request on Unix (fork) and a thread per request on Windows. That is the entire concurrency story — no worker pool to size, no event loop to starve. The listen backlog is 256.
-
-### When a response is too big to buffer: `SERVER_STREAM_SCRIPTS`
-
-The normal path captures a script's whole output in memory up to `SERVER_MAX_RESPONSE_MB`, sets `Content-Length`, and sends it. That is wrong for a script that produces an unbounded response — a `git clone` of a multi-gigabyte repository, a database dump, a large download. The request is tiny, so the size-based streaming heuristic never fires, and the response is truncated at the cap.
-
-`SERVER_STREAM_SCRIPTS` names the scripts whose **response** should be relayed as it is produced, regardless of request size:
-
-```ini
-SERVER_STREAM_SCRIPTS=_fallback,clone,export
-```
-
-For a listed script the server relays stdout straight to the client:
-
-- **No `SERVER_MAX_RESPONSE_MB` cap, no full-body buffering.** Memory stays flat while gigabytes flow.
-- **Idle timeout only** — the deadline resets on every read and write. A client that stops reading is bounded by a socket send timeout so it cannot pin the child forever.
-- **Correct HTTP framing.** If the script sets `Content-Length`, it is honored. Otherwise the response is chunked for HTTP/1.1 — and the terminating zero-chunk is only written when the script exits cleanly, so a script that fails midway shows up as a truncated transfer rather than a silently short body. HTTP/1.0 clients (which cannot parse chunks) get a close-delimited body instead.
-- **Clean child handling.** A client disconnect turns into `EPIPE` in the child, which is then sent `SIGTERM` and `SIGKILL` and reaped — no orphaned processes.
-
-The flag is a comma-separated list of script base names (up to 16). It applies to `_fallback` like any other script, so a catch-all download endpoint streams without extra wiring. **It is Unix-only:** on Windows the setting is ignored with a warning, because response streaming there would require a different relay path.
+A value that contains exactly two dots is treated as a JWT; anything else passed as `--token` is routed to the mesh key slot with a warning, so a mistyped pre-shared key never silently becomes a token. When no token is given explicitly, the worker falls back to `SX_TOKEN`, then to the stored SCORPIO+ credential at `~/.scorpiox/auth.json`.
 
 ---
 
-## Static files: `SERVER_STATIC_ROOT`
+## JWT authentication in the server
 
-Not every route is a script. When `SERVER_STATIC_ROOT` is set, GET/HEAD requests that match no script route (no `index`, no `{name}`, no `_fallback`) are served as files from that directory before the final 404:
+Set `SERVER_JWT_SECRET` and the server validates a signed JWT on each request, before any handler runs. Validation is HMAC-SHA256, the algorithm a browser login and a SCORPIO+ token both use. The secret is either an inline string or a path to a file — a file is read once at startup and trailing whitespace is stripped, which is the right shape for a secret mounted as a file in a container.
 
-```ini
-SERVER_STATIC_ROOT=/var/www/assets
-```
+The token is read from the `Authorization: Bearer` header first, and from a cookie named by `SERVER_JWT_COOKIE` when configured. Issuer and audience checks run only when you set them; leaving `SERVER_JWT_ISSUER` or `SERVER_JWT_AUDIENCE` empty deliberately accepts any issuer or audience.
 
-```
-/var/www/assets/
-  index.html      ->  GET  /
-  app.js          ->  GET  /app.js
-  img/logo.svg    ->  GET  /img/logo.svg
-```
-
-How it behaves:
-
-- **Scripts always win.** Static serving is the last resort, after every script route has been tried — existing sites are unaffected, and a file can never shadow a script of the same name.
-- **GET and HEAD only.** Other methods fall through to the normal 404 path.
-- **Directories resolve to `index.html`.** A request for a directory (or a path with no file) appends `index.html`.
-- **MIME types are chosen from the extension** — HTML, JS, CSS, JSON, images (PNG/JPEG/GIF/SVG/WebP), ICO, PDF, WASM, fonts (WOFF/WOFF2), audio/video (MP3/MP4), XML, text, ZIP/GZIP, and binaries; anything unknown is served as `application/octet-stream`.
-- **HEAD returns headers only.**
-- **Hardened.** A `..` in the path is refused up front, and the resolved file is verified to actually live inside the root (catching symlinks and encoded escapes). Files are opened read-only, streamed in 64 KB chunks, and sent with `Cache-Control: no-store, no-cache, must-revalidate`.
-
-This is how you host a pure-static site — a landing page, a docs tree, build artifacts, a Web UI's assets — on the same engine, and it pairs naturally with git deploy mode: point `-r` at a repo and set `SERVER_STATIC_ROOT` into the clone, and a `git push` updates your static assets too. Empty (the default) means off.
-
----
-
-## Built-in endpoints
-
-Two health/utility endpoints ship in the binary itself, plus optional favicon serving:
-
-| Route | Behavior |
-|-------|----------|
-| `GET /api/ping` | Returns `ok` as plain text. Always unauthenticated — this is your load-balancer and uptime-probe target. |
-| `GET /api/otp?a=ACCOUNT&s=SECRET` | Generates a TOTP code by invoking the `scorpiox-otp` CLI (which must be installed). Returns JSON. Both parameters are validated against a strict character set and rejected with `400` otherwise. Like `/api/ping`, this endpoint is matched before JWT protection — it is never gated. |
-| `GET /favicon.ico` | Serves `SERVER_FAVICON` — either a base64-encoded icon inline in config or a file path (max 1 MB), sent as `image/x-icon`. Unset means no favicon route. |
-
-`OPTIONS` requests get a real answer too: `204 No Content` by default, unless a script named `options` (or the fallback) exists, in which case the request is routed to it — CORS preflight handling you can customize in script.
-
----
-
-## Git deploy mode: push to deploy
-
-This is the deployment story, and it needs no pipeline:
-
-```bash
-scorpiox-server -r https://git.example.com/org/site.git
-scorpiox-server -r https://git.example.com/org/site.git -b staging --poll 30
-```
-
-What happens:
-
-1. The server clones the repository (`--depth 1`) into its cache directory and serves **the clone** as the script directory.
-2. In git mode the route prefix defaults to `/` — a site repository is the site, no prefix ceremony.
-3. A background poll thread compares the local `HEAD` with the remote branch head (`git ls-remote`) every `SERVER_GIT_POLL_INTERVAL` seconds (default 10). On a change it pulls (`fetch` + `reset --hard FETCH_HEAD`) and the new code is live on the next request.
-
-Configuration for the mode:
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `SERVER_GIT_CACHE_DIR` | `~/.cache/scorpiox-server` (honors `XDG_CACHE_HOME`; `%LOCALAPPDATA%\scorpiox-server` on Windows; UID-qualified `/tmp` fallback created `0700`) | Where clones live |
-| `SERVER_GIT_POLL_INTERVAL` | `10` | Seconds between remote-head checks |
-| `SERVER_GIT_PAT` | *(empty)* | Personal access token, injected into HTTPS URLs for private repositories |
-
-Operational details worth knowing: an existing clone is pulled rather than re-cloned on restart; a failed pull logs a warning and keeps serving the previously working code rather than taking the site down; a failed initial clone aborts startup. Git operations never touch a shell — they are spawned as argument vectors directly, eliminating the command-injection class of bug. And the obvious security note: deploying whatever the branch contains is exactly as trustworthy as whoever can push to that branch. Treat write access to the deploy branch as production access.
-
-The loop is deliberately simple — no webhooks to receive, no runners to register. `git push` is the deploy button, and the site follows the branch within one poll interval. For most sites that is the entire CI/CD story.
-
----
-
-## Authentication: built-in JWT
-
-Set one key and every route can require authentication:
-
-```ini
-SERVER_JWT_SECRET=<hmac-secret>        # or a file path: /etc/scorpiox/jwt.key
-SERVER_JWT_PROTECT=/admin,/api/private
-SERVER_JWT_LOGIN_URL=https://login.example.com
-SERVER_JWT_COOKIE=sx_token
-```
-
-The server validates **HMAC-SHA256** JWTs itself — no library, no middleware package. Tokens arrive as an `Authorization: Bearer` header or, if `SERVER_JWT_COOKIE` is set, from the named cookie (the header is checked first). Verification is constant-time, expired tokens (`exp`) are rejected, and optional `iss`/`aud` checks pin tokens to your issuer and audience. An empty `SERVER_JWT_SECRET` disables validation entirely — scripts then decide their own authentication, which is a legitimate mode for sites that handle auth internally.
-
-**Who gets blocked, and how.** Only routes whose path starts with a prefix in `SERVER_JWT_PROTECT` require a token. An unauthenticated browser (`Accept: text/html`) hitting a protected route is redirected to `SERVER_JWT_LOGIN_URL` when that is set; anything else gets `401` with a JSON error body. `SERVER_JWT_PUBLIC` carves exemptions back out of a protected prefix — a site can protect `/` yet leave `/assets` and `/api/health` open. The two match differently: `PROTECT` is a raw prefix match (`/admin` also covers `/adminX`), while `PUBLIC` matches whole path segments (`/assets` covers `/assets` and `/assets/x`, but not `/assetsX`). A trailing slash in either value is trimmed. A valid token on a public route is still validated and exported — public means *not required*, not *ignored*.
-
-**Identity reaches your scripts.** Every request exports what it knows about the caller as environment variables:
+**What a handler learns about the caller.** A validated token becomes environment variables, so a handler never parses a token itself:
 
 | Variable | Source |
 |----------|--------|
-| `X_AUTHENTICATED` | `1` or `0` — always set when a secret is configured |
-| `X_USER_ID` | The token's `sub` claim (falls back to `nameid`) |
-| `X_USER_EMAIL` | The token's `email` claim |
-| `X_JWT_RAW` | The decoded payload JSON |
-| your mappings | `SERVER_JWT_CLAIMS=role=X_ROLE,perm=X_PERMS` exports any claims you name; array claims arrive comma-joined |
+| `X_AUTHENTICATED` | `1` when a valid token was presented, `0` otherwise |
+| `X_USER_ID` | the `sub` claim (falling back to `nameid`) |
+| `X_USER_EMAIL` | the `email` claim |
+| `X_JWT_RAW` | the full decoded payload as JSON |
+| *custom* | every claim named in `SERVER_JWT_CLAIMS` |
 
-So `SERVER_JWT_CLAIMS` is your authorization seam: mint tokens with a `permissions` claim, map it to an environment variable, and have scripts check it. Roles, tiers, scopes — the server handles verification and transport; your script decides what the identity may do.
+`SERVER_JWT_CLAIMS` maps claim names to variable names — `permissions=X_USER_PERMISSIONS,role=X_USER_ROLE,name=X_USER_NAME` — and array claims are joined with commas, so `["admin","git"]` arrives as `admin,git`. A handler can branch on that without a second lookup.
 
----
+**Enforcement.** `SERVER_JWT_PROTECT` lists route prefixes that require a valid token (`/admin,/api/private,/dashboard`). `SERVER_JWT_PUBLIC` exempts prefixes from that requirement, matching whole path segments — `/assets` covers `/assets` and `/assets/x` but not `/assetsX` — so you can protect `/` while still serving static assets and a health check. A request to a protected route without a valid token gets JSON `{"error":"unauthorized"}` with status 401; if the client sent `Accept: text/html` and you set `SERVER_JWT_LOGIN_URL`, it gets a 302 redirect there instead. A *valid* token on a public route is still validated and still exported to the handler — it just is not required.
 
-## Network exposure controls
-
-Two more layers ship in the binary:
-
-- **IP allowlist:** `SERVER_IP_WHITELIST=203.0.113.7,10.0.0.0/8` restricts script routes and built-in endpoints to listed IPs or CIDR ranges. Empty means allow all. Behind a reverse proxy, the check consults `X-Forwarded-For` first, then `X-Real-IP`, then the socket peer — the first available proxy header wins, with no fallback to the peer address when a proxy header is present. Non-matching clients get `403 Forbidden`. Note the boundary: mesh endpoints (`/ws/join`, `/mesh/nodes`, `/node/<id>/`) are intercepted at the accept loop *before* the allowlist runs, which is exactly why the mesh has its own JWT/PSK authentication layer — the allowlist protects your routes, the mesh auth protects the tunnel.
-- **TLS:** the server speaks plain HTTP and expects TLS termination in front of it — Caddy, nginx, IIS, a cloud load balancer, whatever your stack already runs. This is the same pattern the product's own infrastructure uses, and it keeps the binary free of certificate management. Terminate TLS at the front, point it at `scorpiox-server`, done.
-
-The two compose into a sensible default posture: TLS terminator in front, JWT on the sensitive prefixes, IP allowlist when the audience is known. Everything is config keys — no policy files, no middleware wiring.
+Enforcement is off by default. With no `SERVER_JWT_PROTECT`, the server validates and exports identity but lets every request through, and each script decides what to do about it.
 
 ---
 
-## MCP mode: your scripts become agent tools
+## MCP mode: your scripts as tools
 
-With `--mcp`, the served folder gains a second interface: every script becomes an **MCP tool** callable by any MCP client — including other SCORPIO CODE instances and the llama.cpp Web UI.
+Add `--mcp` and the server also answers MCP JSON-RPC 2.0 on `POST /mcp`, exposing the handlers in its directories as tools:
 
 ```bash
-scorpiox-server --mcp -p 8888
-scorpiox-server -r https://git.example.com/org/tools.git --mcp
-scorpiox-server --mcp --name myserver
+scorpiox-server --mcp -p 8888                 # serve this folder's scripts as tools
+scorpiox-server -r https://git.example.com/ops.git --mcp   # serve a repo's scripts as tools
+scorpiox-server --mcp --name ops-server       # custom advertised name
 ```
 
-The endpoint is `POST /mcp`, speaking MCP JSON-RPC 2.0 over Streamable HTTP: `initialize` (protocol version `2024-11-05`, your `serverInfo` name from `--name` or `MCP_SERVER_NAME`), `tools/list`, `tools/call`, and proper JSON-RPC errors for unknown methods. A tool call forks the script, passes the arguments as JSON on stdin, and returns stdout as the tool result — with `isError` flagged when the exit code is non-zero.
+Each handler becomes a tool named after its file. A handler can describe itself by answering a `--schema` probe: the first line is the tool description, and each following line declares a parameter as `name:type:description:required|optional`. At startup the server probes each handler with a short timeout, registers the ones that answer, and prints the resulting tool list, then serves MCP traffic:
 
-Scripts can self-describe with a `--schema` flag:
+- `initialize` replies with protocol version `2024-11-05`, a tools capability, and the advertised name (`MCP_SERVER_NAME`, or `--name`, default `scorpiox-server`).
+- `tools/list` returns every registered tool with its input schema.
+- `tools/call` runs the handler, passes the call arguments as JSON on standard input, captures standard output, and returns it as text content — with the error flag set when the handler exits non-zero.
+- An unknown method gets a proper JSON-RPC error rather than a hang.
 
-```
-# deploy_report --schema prints:
-#
-# Build a deployment report for an environment.
-# environment:string:staging or production:required
-# since:string:ISO date, e.g. 2026-09-01:optional
-```
+Tool names are restricted to letters, digits, `-`, and `_`, names beginning with `_` are skipped (so `_fallback` is never advertised), and `MCP_TOOL_EXCLUDE` takes comma-separated globs — `helper-*,setup,*.bak` — so auxiliary scripts never leak into a model's tool list.
 
-Line one is the tool description; each following line is a parameter as `name:type:description:required|optional`. At startup the server probes each script with this flag (5-second timeout), builds real JSON schemas from what answers, and registers up to 128 tools. Tool names must be alphanumeric plus `_` and `-`, names starting with `_` are skipped (internal helpers stay internal), and `MCP_TOOL_EXCLUDE=helper-*,setup,*.bak` filters out anything that should never be advertised as a tool.
-
-The same deployment modes apply: MCP mode over a git-deployed repo means your tool folder gets updates by `git push`, same as a website. For the client side of MCP — connecting *to* other servers, OAuth flows, allow/deny lists — see [Native MCP 2.0 and OAuth 2.1](mcp.md).
-
-One operational caution, stated plainly: a tool call executes a script with your privileges, and `/mcp` answers whatever client can reach the port. Combine `SERVER_IP_WHITELIST`, JWT protection via your TLS terminator's auth layer, and `MCP_TOOL_EXCLUDE` so nothing dangerous gets advertised by accident.
+Because a tool call runs a handler with the server's privileges and the endpoint answers whatever client can reach the port, treat MCP mode as production surface. Keep `SERVER_IP_WHITELIST` on, put a TLS terminator in front if it crosses a network, and exclude anything that is not meant to be called. This is the server side of SCORPIOX CODE's native MCP support; see [Native MCP 2.0 and OAuth 2.1](mcp.md) for the client side and the full comparison.
 
 ---
 
-## The mesh: sites behind NAT, without open ports
+## The mesh: serving a machine behind NAT
 
-`scorpiox-server` also speaks an **inverted transport** — a reverse-tunnel mesh that solves the oldest deployment problem there is: how do you serve a site on a machine that has no open inbound ports?
+A **hub** accepts outbound connections from **workers** and routes requests to them, so a worker needs no inbound port and no public address. This is the transport SCORPIOX BOT uses for fleet nodes behind NAT, and the same idea works for any site.
 
-**A hub** accepts worker connections and routes public traffic to them:
+Run a hub:
 
 ```bash
 scorpiox-server --hub -p 8080
 ```
 
-**A worker** dials out to the hub and serves traffic through that connection:
+Run a worker that dials it:
 
 ```bash
-scorpiox-server --connect wss://mesh.example.com/ws/join --id build-node
+scorpiox-server --connect wss://hub.example.com/ws/join --id branch-office
+scorpiox-server --join ws://hub.local:8080/ws/join --id lab-2 --key <psk>
 ```
 
-Run the worker with no `-p` flag and it opens **zero inbound ports** — it only dials out. (Give it a port and it also listens locally, which is how a machine can be both a mesh worker and a normally-reachable server.) The hub receives `GET /node/<id>/<path>`, forwards it down the worker's existing tunnel, the worker executes it through its normal routing (same scripts, same CGI environment, same JWT identity variables), and the response streams back — including POST bodies and SSE. A worker behind home NAT, a container, or a corporate firewall becomes a reachable site as long as it can make *outbound* connections.
+A worker connects out through a WebSocket reverse tunnel and reports itself to the hub under its node id (the hostname by default). The hub then exposes three ingress surfaces:
 
-Hub endpoints, all intercepted alongside its normal local routes:
+| Surface | Purpose |
+|---------|---------|
+| `GET /ws/join?id=<id>&token=<token>` | worker handshake |
+| `GET /mesh/nodes` | JSON registry of live nodes |
+| `/node/<id>/<path>` | route a request to that node's own handlers |
 
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /ws/join` | Worker registration handshake |
-| `GET /mesh/nodes` | JSON registry of connected nodes: `mode`, node `id`s, `connected_at`, `last_seen` |
-| `GET|POST /node/<id>/<path>` | Route traffic through a worker's tunnel |
+Authentication on a hub is chosen automatically from its configuration, and can be combined:
 
-Connection hygiene is handled: 30-second keepalive pings, automatic reconnection with exponential backoff (1 s doubling to a 30 s ceiling, auth failures jumping straight to the ceiling), and a dead worker answers `502 node offline` while its registration — and its owner — are retained for when it returns.
+- **SCORPIO+** — set `SERVER_JWT_SECRET` and `/ws/join`, `/mesh/nodes`, and `/node/<id>/` all require a valid signed token. Node ids are bound to the `sub` of the token that first claimed them, and one tenant cannot see or reach another's nodes; cross-tenant access is refused. This is the multi-tenant mode.
+- **Pre-shared key** — `--key` or `SERVER_MESH_KEY` gates `/ws/join` (and nothing else), which is the right shape for a self-hosted, single-tenant hub.
+- **Open** — neither is set; everything is reachable. Fine on a trusted LAN, wrong on the internet.
 
-**Three authentication modes, selected automatically by configuration:**
+The hub strips any client-supplied `X-Mesh-*` header and injects its own `X-Mesh-Node`, `X-Mesh-User`, and `X-Mesh-Email` before handing the request to the node, so a handler sees trustworthy mesh identity as `HTTP_X_MESH_*`. Errors are consistent JSON with a status you can act on — `400` for a missing id, `401` unauthorized, `403` wrong key or forbidden node, `409` a node id owned by someone else, `502` a node offline, `504` a tunnel timeout.
 
-| Mode | Trigger | Effect |
-|------|---------|--------|
-| **SCORPIO+** (JWT) | `SERVER_JWT_SECRET` set on the hub | `/ws/join`, `/mesh/nodes`, and `/node/<id>/` all require a valid token. Every node id is bound to the `sub` of the token that first registered it — user A cannot reach, hijack, or even list user B's nodes. The `admin` permission bypasses ownership checks and sees owner metadata in the registry. |
-| **PSK** | `--key <secret>` / `SERVER_MESH_KEY` | A pre-shared key gates `/ws/join` only; node routes and the registry stay open. Simple LAN trust. |
-| **Open** | neither | Everything open. Dev machines and trusted LANs only. |
-
-JWT and PSK combine — the token provides identity, the key is an extra gate. Client-supplied `X-Mesh-*` headers are stripped at the hub and replaced with the real authenticated identity (`X-Mesh-Node`, `X-Mesh-User`, `X-Mesh-Email`), so a script behind a worker sees trustworthy caller identity it cannot be spoofed into believing.
-
-Workers find their token in order: `--token`, `SERVER_MESH_TOKEN`, the `SX_TOKEN` environment variable, then the `~/.scorpiox/auth.json` file written by `scorpiox-bot login` — so a machine that has already logged into SCORPIO+ needs no token plumbing at all. `wss://` is supported with certificate verification against the system CA store (or `SERVER_MESH_CA_FILE`); `--insecure` skips verification, loudly. The hub itself always speaks plaintext with TLS terminated in front of it — the product's own hub at `mesh.scorpiox.net` runs exactly this way behind Caddy.
-
-The cleanest way to run all of this: `scorpiox-bot --connect` supervises a mesh worker for you — wiring the token, the node id, the parent-death shutdown so an orphaned tunnel can never outlive its supervisor — and shows up in the SCORPIO BOT fleet dashboard. See [Remote Agent Control and Fleet Management with SCORPIOX BOT](scorpiox-bot.md).
+A worker reconnects on its own with exponential backoff up to 30 seconds; an authentication failure jumps straight to the maximum delay, because retrying fast cannot fix a bad credential. The hub handles each tunnelled request on its own thread, so a long-lived stream on one node never blocks the registry or another node's traffic. Worker URLs may be `ws://`/`http://` for plaintext or `wss://`/`https://` for TLS, with `SERVER_MESH_CA_FILE` supplying a custom CA bundle and `--insecure` disabling verification for a test hub. The hub itself speaks plaintext — put a TLS terminator such as Caddy in front of it.
 
 ---
 
-## The shared-library form factor
+## How it compares to the mainstream servers
 
-The same source also builds **`scorpiox-server-dll`**, a shared library exposing `web_server_start`, `web_server_stop`, `web_server_status`, and `web_server_get_config` for embedding in another application via P/Invoke or FFI. Point it at a JSON config (`root_dir`, `route_prefix`, `port`) and your .NET (or anything-with-FFI) application hosts a full script-serving web server in-process — no side process, no port juggling between apps.
+The stacks an operator would otherwise reach for are all capable, and all ask you to assemble a deployment around them. Here is the honest shape of the difference.
 
----
+| | What it is | Runtime you install | Where routing lives | How you deploy | Built-in auth | Machine-readable output |
+|--|-----------|--------------------|--------------------|----------------|---------------|-----------------------|
+| **IIS** | Windows web server | IIS role and its feature modules | `web.config` and handler mappings | MSDeploy, file copy, or a pipeline | Windows auth / forms modules, separate config | Application's job |
+| **Apache httpd** | Cross-platform web server | Apache plus modules (and mod_wsgi/mod_proxy to reach an app) | `.htaccess` and `httpd.conf` | File copy and reload | `mod_auth*` modules | Application's job |
+| **nginx** | Edge server and reverse proxy | nginx, often plus an app server behind it | `nginx.conf` location blocks | File copy and reload | `auth_request` / external | Application's job |
+| **ASP.NET Core Kestrel** | Application web server | .NET runtime and SDK tooling | Attribute/endpoint routing in compiled C# | `dotnet publish` and a service | ASP.NET authentication middleware | You write the JSON endpoints |
+| **`scorpiox-server`** | Handler server | Nothing beyond the binary (and `python3` for Python handlers) | The file layout, one directory per route | `git push`, then poll | JWT enforced in the server | Contract on every page via `?format=json` |
 
-## How this compares to the mainstream stacks
+Read the table as an operator, not a marketer:
 
-Here is what an operator would otherwise assemble, and what each piece costs:
+- **Every stack above can serve a site.** The difference is what you must install and wire before the first route answers. IIS and Apache want modules and configuration languages; nginx usually wants an application server behind it; Kestrel wants a .NET runtime and toolchain. `scorpiox-server` wants a port and a folder.
+- **Routing is the sharpest contrast.** In the mainstream stacks the routing table is configuration you maintain separately from the code. Here each route is a file, so adding a page is adding a file and deploying is pushing — nothing to keep in sync, no mapping to drift.
+- **Deployment is the second sharpest.** A push-and-poll deploy removes the copy-and-reload step, the build step for native handlers, and the pipeline glue in between. You edit, you commit, you push, and the route is live within one poll interval.
+- **Auth and the JSON contract are built in, not bolted on.** JWT validation, claim-to-variable export, and route protection live in the server; and the HTML-plus-JSON convention is a stated requirement of your pages rather than a second API you build beside them. Neither is a plugin you select and configure.
 
-| | **IIS** | **Apache httpd** | **nginx** | **ASP.NET Core (Kestrel)** | **scorpiox-server** |
-|---|---|---|---|---|---|
-| What you install | A Windows Server role | The httpd package + MPM choices | The nginx package | .NET SDK + runtime, `dotnet` CLI | One static binary |
-| Routing | web.config, handlers, URL Rewrite module | `.htaccess` + mod_rewrite | `location` blocks in nginx.conf | C# attribute/endpoint routing in code | **The file layout is the routing** |
-| Script/runtime execution | CGI/FCGI + external process managers | mod_cgi / mod_fcgid / php-fpm | None natively — proxies to something that does | The app *is* the runtime (C#) | Native exec + `python3`, in-process |
-| Auth | Windows auth + modules; JWT via packages | Auth modules per scheme | Auth via config or proxied app | JWT bearer NuGet package + middleware code | **Built in, one config key** |
-| Git-push deploy | Web Deploy / MSBuild pipelines | Custom scripts | Custom scripts | `dotnet publish` + CI jobs | **Built in, one flag** |
-| Static files | IIS static handler + MIME config | mod_mime + config | `root`/`alias` + `try_files` | `UseStaticFiles()` middleware | **Built in, one directory key** |
-| Large/streamed responses | Response-buffering knobs | Proxy buffering directives | `proxy_buffering` / `sendfile` | `Results.Stream` in code | **Per-script streaming list** |
-| TLS | IIS bindings + certs | mod_ssl + cert wiring | Server blocks + certs | Kestrel behind IIS/nginx, typically | Any TLS terminator in front |
-| Machine-readable responses | App-level concern | App-level concern | App-level concern | App-level concern | **Stated contract on every page** |
-| Serving sites behind NAT | Needs tunneling product | Needs tunneling product | Needs tunneling product | Needs tunneling product | **Built in (mesh mode)** |
-| Config surface | web.config + app pools + modules | httpd.conf + .htaccess sprawl | nginx.conf + includes | Program.cs + appsettings.json + csproj | One `KEY=VALUE` file, same cascade as the agent |
-
-The honest framing: those stacks are excellent at the things they were built for, and a large organization with dedicated platform teams should keep them. What scorpiox-server changes is the **floor**. The floor for serving a script-backed site with authentication, deployment, static assets, and machine-readable responses drops from *five coordinated products and their wiring* to *one binary, one config file, and one git remote*. And when a site outgrows the floor — when you genuinely need nginx's raw proxy throughput or IIS's Windows integration — the TLS-terminator pattern means the mainstream stack slots in front of scorpiox-server without displacing it.
-
----
-
-## The operator checklist
-
-Bringing a site up, end to end:
-
-```bash
-# 1. Write the site — scripts in a folder
-mkdir -p /var/site && cd /var/site
-cat > index.py <<'EOF'
-#!/usr/bin/env python3
-print("Content-Type: text/html")
-print()
-print("<h1>It works</h1>")
-EOF
-
-# 2. Configure
-cat > /etc/scorpiox/scorpiox-env.txt <<'EOF'
-SERVER_PORT=8080
-SERVER_SCRIPT_DIR=/var/site
-SERVER_ROUTE_PREFIX=/
-SERVER_STATIC_ROOT=/var/www/assets
-SERVER_STREAM_SCRIPTS=_fallback,export
-SERVER_JWT_SECRET=/etc/scorpiox/jwt.key
-SERVER_JWT_PROTECT=/admin
-SERVER_JWT_LOGIN_URL=https://login.example.com
-SERVER_IP_WHITELIST=203.0.113.0/24
-EOF
-
-# 3. Run — or deploy by git and let it follow the branch
-scorpiox-server -r https://git.example.com/org/site.git -b main
-
-# 4. Terminate TLS in front, point /api/ping at your monitor
-```
-
-Every key above is documented in the shipped `scorpiox-env.txt` and read through the standard cascade — machine-wide, user, project, and profile tiers all work, so a staging server and a production server can be two profiles of the same file. See [Configuration and Profiles](scorpiox-env.md).
+If you need upstream load balancing, HTTP/2 edge termination, or a mature module ecosystem, keep nginx or IIS at the edge and let `scorpiox-server` handle the application routes behind it. If you want a single native binary where the route is the file and the deploy is a push, that is exactly what this is.
 
 ---
 
 ## Gotchas
 
-- **The default route prefix is not `/`.** The compiled-in default is `/api/platform/websites/` — a legacy integration path. Sites almost always want `SERVER_ROUTE_PREFIX=/`. Git deploy mode defaults to `/` for exactly this reason; bare mode does not. If your routes 404 and the banner shows a long prefix, this is why.
-- **`/api/ping`, `/api/otp`, and `/favicon.ico` are reserved.** A script named `api` will not shadow `/api/ping` — the built-in endpoints are matched before script routing. Plan around them.
-- **Query parameters are filtered, and never overwrite.** Only names of `[A-Za-z0-9_]` starting with a non-digit and containing at least one lowercase letter are exported, and never over an already-set variable. All-uppercase names (`PATH`, `REQUEST_METHOD`, `GIT_ORG`, `POST_BODY_FILE`) are silently dropped — pass uppercase identifiers in a POST body instead. The payoff: a request can no longer poison the environment your script, the CGI layer, or your own `-e` overrides run in.
-- **The idle timeout is not a total timeout.** A script that prints one dot every 299 seconds runs forever. If you need wall-clock limits, enforce them in the script.
-- **`SERVER_JWT_PROTECT` and `SERVER_JWT_PUBLIC` match differently.** `PROTECT` is a raw prefix match — `/admin` also protects `/adminX`. `PUBLIC` is whole-segment — `/assets` exempts `/assets/anything` but not `/assetsX`. A trailing slash in either value is trimmed, so `/assets/` behaves the same as `/assets`. If you protect `/admin`, protect against lookalike paths too (use `/admin/` and a route that never starts with the same letters).
-- **A valid token on a public route is still validated and exported.** Public means *not required*, not *ignored*. Scripts can rely on `X_USER_ID` on public routes when a token happens to be present — and should check `X_AUTHENTICATED` before trusting it.
-- **Git deploy mode serves the branch, not a release artifact.** A bad push goes live within one poll interval. Protect the branch, or use a deploy branch you push to deliberately.
-- **The response cap is a buffer cap, not a streaming cap.** A buffered script that would emit 300 MB gets truncated at `SERVER_MAX_RESPONSE_MB`. Raise the cap, or list the script in `SERVER_STREAM_SCRIPTS` to stream its output with no size cap (Unix only).
-- **`SERVER_STREAM_SCRIPTS` is Unix-only.** On Windows the setting is ignored with a warning — size the response cap instead, or terminate at a proxy that streams.
-- **Static serving is the last resort.** `SERVER_STATIC_ROOT` only runs after every script route (including `_fallback`) has missed, so a `.html` file can never shadow a script of the same name. If a static page 404s while the file clearly exists, check that no `_fallback` script is swallowing the route.
-- **`/mcp` has no JWT gate of its own.** MCP tool calls run scripts with your privileges. Protect the port with `SERVER_IP_WHITELIST` or terminate auth at your TLS proxy before exposing it beyond a trusted network.
-- **Mesh workers need outbound connectivity only — and that is also their failure mode.** A worker that can no longer reach the hub disconnects; the hub returns `502 node offline` for its routes until it reconnects. Design clients to tolerate transient `502`s on `/node/` routes.
-- **The hub is plaintext by design.** Do not "fix" this by putting certificates on the hub — put a TLS terminator (Caddy, nginx, a load balancer) in front, exactly like the product's own mesh does.
+- **The prefix surprises people in both directions.** The default `/api/platform/websites/` is not what a public site wants; set `SERVER_ROUTE_PREFIX=/` for root URLs. In git deploy mode the default already flips to `/`, but an explicit prefix in your config wins.
+- **Handlers always beat static files.** If a static asset and a handler share a name, the handler is what answers. Keep static assets under paths no handler claims.
+- **A handler responds on any method it receives.** The method arrives in `REQUEST_METHOD`; the documented convention is GET and POST, but do not assume the server rejects other verbs for you — validate in the script if it matters.
+- **Empty versus absent, again.** A key set to an empty value in a higher configuration tier still shadows a lower tier; an empty OS environment variable is ignored. See the configuration guide for the exact rule.
+- **`SERVER_STREAM_SCRIPTS` is Unix only.** On Windows it is ignored with a warning, and large responses are still bounded by `SERVER_MAX_RESPONSE_MB`.
+- **A streamed response has no size cap but an idle timeout.** It is bounded by `SERVER_SCRIPT_TIMEOUT` (no output), not by the response limit. A quiet stream is reaped.
+- **JWT enforcement is opt-in.** Setting a secret alone validates and exports identity but blocks nothing. You must also set `SERVER_JWT_PROTECT` to close routes.
+- **The mesh hub is plaintext.** Terminate TLS in front of it. Use `wss://` for the worker-to-hub hop and `SERVER_MESH_CA_FILE` for a private CA.
+- **MCP mode executes scripts.** A tool call runs a handler with the server's privileges; whitelist the IPs, exclude auxiliaries, and do not expose `/mcp` to the open internet.
 
 ---
 
 ## Related
 
-- [Native MCP 2.0 and OAuth 2.1](mcp.md) — the client side of MCP, and more on `--schema` self-description.
-- [Remote Agent Control and Fleet Management with SCORPIOX BOT](scorpiox-bot.md) — the fleet layer that supervises scorpiox-server as its API tier, and the `?format=json` machine contract in practice.
-- [Configuration and Profiles](scorpiox-env.md) — the cascade every `SERVER_*` key is read through.
-- [Privacy Architecture and Zero Data Collection](data-privacy.md) — what the server writes to disk, and what never leaves your machine.
+- [Configuration and Profiles](scorpiox-env.md) — the cascade every `SERVER_*` key resolves through, and where to put each one.
+- [Remote Agent Control & Fleet Management with SCORPIO BOT](scorpiox-bot.md) — the fleet built on this server and its mesh, with the same `?format=json` dialect.
+- [Native MCP 2.0 and OAuth 2.1](mcp.md) — the MCP client side, the `--mcp` server mode, and the head-to-head harness comparison.
+- [Privacy Policy and Data Architecture](privacy.md) — how the self-hosted, zero-collection deployment of these surfaces is structured.

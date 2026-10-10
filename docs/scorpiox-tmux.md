@@ -11,7 +11,7 @@ It comes in two faces that share the same engine:
 - **The TUI** — launch it with no arguments and you get a live dashboard: a list of active sessions up top, a `>` prompt at the bottom where you type slash commands, and a pane view for peeking and watching a session's screen.
 - **The headless CLI** — the same operations as `--` flags, for scripts, automation, and "I just want to do this one thing without a dashboard."
 
-Docs for SCORPIOX CODE @ `ad926d7`.
+Docs for SCORPIOX CODE @ `e30b171`.
 
 > **The whole idea in one line:** every agent is a *session*; `scorpiox-tmux` lists them, starts them, lets you peek or watch their screen, sends them input, and tears them down — all from one command, in a TUI or from a script.
 

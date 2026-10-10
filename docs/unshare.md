@@ -6,7 +6,7 @@ You want an AI coding agent running somewhere it cannot touch your real machine 
 
 There is no daemon to install, no `dockerd` to keep running, no VM image to boot, and no network stack to configure. One binary, one command, one container.
 
-Docs for SCORPIOX CODE @ `ad926d7`.
+Docs for SCORPIOX CODE @ `e30b171`.
 
 > **The whole idea in one line:** `scorpiox-unshare <image> <command>` runs any agent or command inside a real Linux user namespace — no Docker, no podman, no daemon, no VM — and it is the default environment under every SCORPIOX CODE agent session.
 
@@ -89,12 +89,12 @@ A few things worth knowing about image handling:
 
 - **The cache lives under `~/.scorpiox`.** Downloaded archives are kept in `~/.scorpiox/images/`, unpacked root filesystems in `~/.scorpiox/rootfs/<image>/`, and the throwaway writable layer in `~/.scorpiox/work/`. Set `SCORPIOX_HOME` (or pass `--home`) to move all of it.
 - **First launch is slow, every launch after is fast.** Download and unpack happen once. After that, a boot reuses the cached root filesystem and reports its own timing — boot timing output is on by default, and `--no-perf` (or `SCORPIOX_PERF=0`) turns it off.
-- **Updates are noticed, not automatic.** When a cached image is used, the runtime compares it against the remote copy and, if they differ, prints an update notice. Apply it when you want to:
+- **Updates are noticed, not automatic.** When a cached image is used, the runtime compares it against the remote copy and, if the sizes differ, prints an update notice. Apply it when you want to:
 
 ```bash
-scorpiox-unshare --list                # see what is available, with sizes and what is cached
-scorpiox-unshare --update agentcore-latest   # re-download and re-extract one image
-scorpiox-unshare --clean               # remove all unpacked root filesystems and work dirs
+scorpiox-unshare --list                        # see what is available, with sizes and what is cached
+scorpiox-unshare --update agentcore-latest     # re-download and re-extract one image
+scorpiox-unshare --clean                      # remove all unpacked root filesystems and work dirs
 ```
 
 - **OCI layouts just work.** If the archive is an OCI image layout rather than a flat root filesystem, the layers are unwrapped automatically into a flat root filesystem.
@@ -151,15 +151,15 @@ That network process is **bundled**. SCORPIOX CODE ships `scorpiox-slirp4netns`,
 
 If no helper can be found at all — a stripped-down host with neither the bundled binary nor a system `slirp4netns` — the runtime fails fast with a clear message rather than starting a container that cannot reach the network.
 
+`-p H:C` maps host port `H` to container port `C`; `-p H` alone maps the same port on both sides. The `-p H+` form is the useful one for automation: it asks for the first free host port at or above `H`, so parallel containers never fight over a port — the desktop images use exactly this to publish VNC.
+
+By default a published port binds on all interfaces. Set `SX_PORT_BIND_ADDR=127.0.0.1` to keep it on loopback only — strongly recommended for anything unauthenticated, and reachable from elsewhere with a plain SSH tunnel.
+
 To reach a service *inside* the container from *outside* it, publish a port:
 
 ```bash
 scorpiox-unshare -p 8080:8080 agentcore-latest "python -m http.server 8080"
 ```
-
-`-p H:C` maps host port `H` to container port `C`; `-p H` alone maps the same port on both sides. The `-p H+` form is the useful one for automation: it asks for the first free host port at or above `H`, so parallel containers never fight over a port — the desktop images use exactly this to publish VNC.
-
-By default a published port binds on all interfaces. Set `SX_PORT_BIND_ADDR=127.0.0.1` to keep it on loopback only — strongly recommended for anything unauthenticated, and reachable from elsewhere with a plain SSH tunnel.
 
 `--net host` skips all of the above and shares the host's network namespace: the container sees your interfaces, your resolver, and everything listening on your machine. It also removes the need for the network helper entirely, which is why some minimal hosts use it — but it is a real reduction in isolation.
 
@@ -188,13 +188,13 @@ When you run through the SCORPIOX CODE path you do not pass these flags by hand 
 |-----|---------|
 | `TMUX_LAUNCH_MODE` | `unshare` (default), `podman`, `wsl`, or `native`. Sets how sessions are built. |
 | `TMUX_DEFAULT_DISTRO` | The default image for unshare sessions. Shipped as `agentcore-latest`. |
-| `TMUX_UNSHARE_EXTRA_ARGS` | Extra CLI arguments passed verbatim to `scorpiox-unshare` (e.g. `--persist /data -p 8080:8080`). |
-| `TMUX_UNSHARE_NET_MODE` | Network mode: empty = isolated (default), `host` = shared host networking. |
+| `TMUX_UNSHARE_EXTRA_ARGS` | Extra CLI flags passed straight to `scorpiox-unshare` (e.g. `"--persist /data -p 8080:8080"`). |
+| `TMUX_UNSHARE_NET_MODE` | Empty means isolated networking (the default); `host` shares the host network. |
 | `TMUX_UNSHARE_VOLUME_MOUNT` | Explicit volume mount (`host:container`). Leave empty to auto-mount the project base paths. |
 | `TMUX_BIND_HOST_BINS` | Bind-mount the host's binaries into the container (default on — skips a download). |
 | `TMUX_BIND_USER_CONFIG` | Bind-mount `~/.claude` into the container read-only (default on). |
 | `TMUX_BIND_TOOLS` | Bind-mount a host tools directory at `/mnt/apps` read-only (default off). |
-| `TMUX_TOOLS_PATH` | Host directory bound at `/mnt/apps` when `TMUX_BIND_TOOLS=1`. |
+| `TMUX_TOOLS_PATH` | Host directory bound at `/mnt/apps` when `TMUX_BIND_TOOLS=1` (default `/root/tools`). |
 | `TMUX_GUI_FOREGROUND` | On desktop images, run the agent in the foreground so it owns the pane (default on). |
 | `TMUX_GUI_VNC_PORT` | Publish the desktop's VNC port to a host port so you can watch it (default `0` = off). |
 | `TMUX_GUI_VNC_BIND` | Host address the published VNC port binds to (default all interfaces; set `127.0.0.1` on a shared network). |
@@ -246,7 +246,7 @@ If you already know `docker` or `podman`, here is where `scorpiox-unshare` stand
 
 **The honest limits.** It is not a general container platform, and it does not pretend to be. There is no `Dockerfile` builder and no multi-stage builds; images are pulled as root filesystems from a base URL rather than built and published through the registry ecosystem; there is no `compose`, no named networks, no volume objects — you get port publishing and bind mounts, and that is the whole surface. A `--memory` limit needs cgroup v2 with a writable cgroup tree on the host. GPU passthrough only exposes devices that exist on the host. If your real job is "run a containerized service with a build pipeline and a compose stack," use Docker or podman — that is what they are for. `scorpiox-unshare` is for the one thing it does exceptionally well: a fast, isolated, rootless Linux box for a command, with nothing else attached.
 
-The networking story is now fully self-contained: isolated networking uses SCORPIOX CODE's own bundled userspace helper (`scorpiox-slirp4netns`), so there is nothing extra to install. If you prefer the system `slirp4netns` — or you have a minimal host where it is already present — set `SX_NET_BACKEND=system` to use it, or leave it on `auto` and let the runtime pick.
+The networking story is fully self-contained: isolated networking uses SCORPIOX CODE's own bundled userspace helper (`scorpiox-slirp4netns`), so there is nothing extra to install. If you prefer the system `slirp4netns` — or you have a minimal host where it is already present — set `SX_NET_BACKEND=system` to use it, or leave it on `auto` and let the runtime pick.
 
 ---
 

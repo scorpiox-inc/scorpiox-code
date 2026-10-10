@@ -4,7 +4,7 @@ Every request SCORPIOX CODE sends to an OpenAI-compatible endpoint can carry a s
 
 The whole feature is one config key: **`OPENAI_EXTRA_HEADERS`**. It ships with a sensible default (two `X-Sx-*` headers naming your session and thread), it accepts any additional headers you want, and it is the single switch for turning identity headers off completely.
 
-Docs for SCORPIOX CODE @ `77c49df`.
+Docs for SCORPIOX CODE @ `e30b171`.
 
 > **The whole idea in one line:** with `PROVIDER=openai`, SCORPIOX CODE stamps every outgoing request with `X-Sx-Session-Id` and `X-Sx-Thread-Id` — a per-session GUID and a per-conversation-lineage GUID — and lets you add, rename, or remove all of it through one key.
 
@@ -26,7 +26,7 @@ Both values are **UUIDs generated on your machine**. Nothing is fetched, nothing
 | `X-Sx-Session-Id` | A UUIDv4 generated when the session is created, stored in that session's `meta.json` | One session — a new session folder means a new value |
 | `X-Sx-Thread-Id` | A UUIDv4 naming the *conversation lineage* the session belongs to | The whole lineage — see [Session vs. thread](#session-vs-thread-why-there-are-two-ids) |
 
-Both GUIDs live in the session's `meta.json` next to the model, provider, and profile, so a session resumed later carries the same identity it had when it was created. If you open a session that predates this feature, SCORPIOX CODE generates GUIDs for it once and writes them back, so older sessions get stable identity too.
+Both GUIDs live in the session's `meta.json` next to the model, provider, and profile, so a session resumed later carries the same identity it had when it was created. If you open a session that predates this feature, SCORPIOX CODE generates GUIDs for it once and writes them back into `meta.json`, so older sessions get stable identity too.
 
 ---
 
@@ -51,11 +51,9 @@ Three placeholders are supported, each substituted **per request**, just before 
 | `{session_id}` | The session's human-readable ID, the same name as the session folder (for example `2026_10_02_quiet_tesla`) | Populated when session file logging has been initialized for the run. |
 | *(unknown tokens)* | Left as literal text | `{anything_else}` is not a known placeholder and is sent verbatim. |
 
-A pair whose value ends up empty is dropped, so a header you configured to a placeholder that resolves to nothing is not sent as `Header:` with an empty value — the pair disappears quietly.
+A pair whose value ends up empty is dropped, so a header configured to a placeholder that resolves to nothing is never sent as `Header:` with an empty value — the pair disappears quietly.
 
-> **Literal-token trap.** Unknown placeholders are passed through as literal text. If you use `{session_id}` in an environment where the session ID has not been populated, the header is sent with the literal string `{session_id}` as its value — recognizable at the receiving end, but probably not what you intended. Prefer `{session_guid}` and `{thread_guid}`, which are always populated for a valid session.
-
-### Custom headers
+### Adding your own headers
 
 Add anything you like after the defaults — static values or placeholder-bearing values:
 
@@ -77,7 +75,7 @@ The list is processed left to right. Whitespace around a pair is tolerated (`Nam
 
 Two identifiers sound redundant until you watch a long task run. They answer different questions:
 
-- **The session GUID answers "which session folder is this?"** It is generated fresh for every new session — `/clear`, a fresh launch, an automatic compaction, all produce a new one. It matches the session's entry in `meta.json` and the folder under `.scorpiox/sessions/`.
+- **The session GUID answers "which session folder is this?"** It is generated fresh for every new session — a fresh launch, `/clear`, and an automatic or manual compaction all produce a new one. It matches the session's entry in `meta.json` and the folder under `.scorpiox/sessions/`.
 - **The thread GUID answers "which conversation lineage is this?"** It is the continuity anchor. A brand-new session starts (roots) a new thread, and a session that has been compacted or resumed **keeps the same thread GUID** as the session it continued from, so every request across that whole run reports one consistent thread. Legacy sessions without a thread GUID fall back to their session GUID when the lineage is carried forward.
 
 The practical difference shows up in what a provider sees:

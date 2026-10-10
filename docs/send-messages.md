@@ -2,9 +2,9 @@
 
 An agent that is in the middle of a turn is not frozen. You can still reach it — stop it, steer it, or leave a note for it to read when it is done. SCORPIOX CODE gives you one shared submission path for all of it, and it works the same whether you are typing at the keyboard, dropping a file on disk, calling an HTTP endpoint, or embedding the agent in your own application.
 
-This page covers the three submit modes, exactly how each behaves in the terminal, the drop-in session inbox, remote control through SCORPIO BOT, and the public embedding API.
+This page covers the three submit modes, exactly how each behaves in the terminal, the drop-in session inbox, remote control through SCORPIO BOT, the public embedding API, and how the whole model compares to other harnesses.
 
-Docs for SCORPIOX CODE @ `ad926d7`.
+Docs for SCORPIOX CODE @ `e30b171`.
 
 > **The whole idea in one line:** every message to a running agent is classified as `auto`, `interrupt`, or `queue` — a *timing* decision, not a transport one — and that same classification runs whether the message came from your keyboard, a file, an HTTP route, or a function call in your own program.
 
@@ -25,7 +25,7 @@ Two facts fall out of the table immediately:
 - **`auto` is the workhorse.** It resolves to "new turn" when nothing is running and to "interrupt" when something is. That is exactly what pressing **Enter** does in the terminal — there is no separate auto/interrupt/queue key in the TUI, just Enter and a `~` prefix (below).
 - **`interrupt` and `queue` only differ while the agent is busy.** When the agent is idle, all three modes do the same thing: they start a new turn.
 
-`interrupt` messages *accumulate*. If you interrupt twice before the agent reaches a tool-call boundary, both notes are joined and delivered together at the next boundary. `queue` messages likewise accumulate — every queued message is joined and sent as one follow-up run when the turn ends.
+Both busy modes also *accumulate*. If you interrupt twice before the agent reaches a tool-call boundary, both notes are joined into one injected message and delivered together at the next boundary. Queue messages combine the same way — every queued note is joined and sent as one follow-up run when the turn ends.
 
 ---
 
@@ -38,7 +38,7 @@ The terminal gives you the three modes with two keys and one prefix.
 Pressing **Enter** submits with `auto`. So:
 
 - Agent **idle** → your text starts a new turn immediately.
-- Agent **busy** → your text becomes an **interrupt**. The transcript echoes it as `[Interrupt] …` and the agent picks it up at the next tool-call boundary, mid-turn.
+- Agent **busy** → your text becomes an **interrupt**. The transcript echoes it as `[Interrupt] …`, and the agent picks it up at the next tool-call boundary, mid-turn.
 
 There is no "are you sure the agent is busy?" prompt. Enter-while-busy is a feature, not a mistake — it is the fastest way to redirect a running turn.
 
@@ -50,13 +50,15 @@ If you type a message while the agent is busy and you want it to wait its turn r
 ~ once this test passes, update the changelog
 ```
 
-The leading `~` (and any spaces after it) are stripped, and the remainder is submitted as **`queue`**. The agent keeps running its current turn, and when that turn ends, SCORPIOX CODE sends the queued text as a fresh run. You will see a `[Queued N] …` line confirming it is waiting, and a `[Sending queued message(s)]` line when it is finally dispatched.
+The leading `~` (and any spaces right after it) are stripped, and the remainder is submitted as **`queue`**. The agent keeps running its current turn, and when that turn ends, SCORPIOX CODE sends the queued text as a fresh run. You will see a `[Queued N] …` line confirming it is waiting, and a `[Sending queued message(s)]` line when it is finally dispatched.
 
-Queue multiple notes by sending several `~`-prefixed messages in a row — they are all held and delivered together when the turn completes. Queued messages also survive a cancel: if you press **ESC** to stop the current turn, anything already queued is still delivered afterward.
+Queue multiple notes by sending several `~`-prefixed messages in a row — they are all held and delivered together when the turn completes. Queued messages also survive a cancel: if you press **ESC** to stop the current turn, anything already queued is still delivered afterward as its own run.
 
 ### ESC: pure cancel
 
 The **ESC** key is not a submit mode. Pressing **ESC** while the agent is running cancels the agentic loop entirely — the turn stops, and if a shell command is executing it is killed on the spot. Nothing is sent in the turn's place. Use it to *stop*, not to *say*.
+
+The table below is the whole keyboard model:
 
 | You want… | In the TUI |
 |-----------|------------|
@@ -140,7 +142,15 @@ Fix the null check in auth.c and run the tests
 
 The `mode` query parameter is the same `auto` / `interrupt` / `queue` set as everywhere else. The **body is plain text** — the SCORPIO BOT layer writes it into the session inbox for you, so the atomic-rename handshake is handled for you rather than something you have to do by hand. A tilde prefix on the body is read as **queue**, which is the same `~` shorthand the TUI uses.
 
-For the *stop* case there is the escape/interrupt path: a signal that cancels the active turn, the remote equivalent of pressing **ESC**. And when you are driving the *terminal* rather than the agent — typing into a shell, sending raw keystrokes — that is the separate low-level input route. The rule of thumb: **inbox for the agent, terminal input for the shell.**
+The route waits briefly for the agent to actually consume the message, so the response tells you whether delivery happened rather than assuming it:
+
+```json
+{ "ok": true, "inbox": true, "stem": "1759000420_000000123", "mode": "auto", "session": "fix-auth-flow", "consumed": true }
+```
+
+A `"consumed": false` result means "written, not yet picked up" — not "failed". The write already succeeded either way.
+
+For the *stop* case there is the escape/interrupt path: a signal that cancels the active turn, the remote equivalent of pressing **ESC**. And when you are driving the *terminal* rather than the agent — typing into a shell, sending raw keystrokes — that is the separate low-level input route. The rule of thumb: **inbox for the agent, terminal input for the shell.** If you are driving the model, send a message; if you are at the prompt, type.
 
 For the exact request/response shapes, streaming endpoints, and the rest of the remote surface, see [Remote Agent Control & Fleet Management with SCORPIO BOT](scorpiox-bot.md).
 
@@ -164,7 +174,7 @@ When you embed the agent in your own application through the public DLL, the sam
 
 `sx_interrupt()` and `sx_interrupt_message()` are the two halves of steering: the first says *stop*, the second says *stop and say this first*. `sx_enqueue()` is the "do this next" path.
 
-Three things worth knowing when you host the agent yourself:
+A few things worth knowing when you host the agent yourself:
 
 - **`sx_send()` is the plain channel, and it is single-slot.** While the agent is busy, a new `sx_send()` is rejected rather than buffered — that is what `sx_enqueue()` is for. `sx_is_busy()` tells you which call to make, and `sx_send_image()` follows the same rule with an image attached.
 - **Interrupts accumulate under your control.** Repeated `sx_interrupt_message()` calls are joined into one injected note; when the buffer is full the call fails loudly instead of silently dropping your text.
@@ -180,28 +190,29 @@ The question every agent harness has to answer is: *what happens to a message th
 
 ### OpenCode v2
 
-OpenCode's v2 model is the most developed of the public alternatives. It separates **steer** (a note the agent should fold into the current run) from **queue** (a note to run after the current run), exposed as the `delivery` field on its "send message" API route. The wording matters: prompts are *durably admitted* — each submitted message is written into a database table with an admission sequence number before any agent work happens, and delivery is the act of *promoting* an admitted row into the conversation at a turn boundary. Steering promotes all pending steers into the next request of the running loop; queueing promotes one queued message plus any pending steers when the current run ends. A per-session run coordinator serializes execution, coalesces the wake-ups that follow new admissions, and owns a separate **interrupt** call that stops the active run — bound to **Escape** in its terminal UI, with a dedicated queue-management view.
+OpenCode's v2 model is the most developed of the public alternatives. It separates **steer** (a note the agent should fold into the current run) from **queue** (a note to run after the current run), and it does not keep that state in volatile memory. Queued and steered messages are written into a **durable, database-backed queue**, and delivery is coordinated by a **leader / queue-management layer** (`leader-q`) that owns which message goes out and when. That coordination survives process restarts and lets a client inspect or mutate the pending queue. For the "stop it" case, OpenCode exposes a dedicated **interrupt key** that halts the active turn.
 
-The consequence of putting the queue in a database: the pending state is inspectable and durable. A client can list what is waiting, the state survives process restarts, and two writers cannot race each other into double-delivery.
+The consequence of putting the queue in a database: the pending state is inspectable and durable, and two writers cannot race each other into double-delivery — at the cost of a persistent store and a coordinator to run it.
 
 ### SCORPIOX CODE
 
-SCORPIOX CODE takes the opposite trade. The interrupt and queue state is **in-memory**: two small, process-local buffers — a 4 KB interrupt buffer for the next tool-call boundary and an 8 KB queue buffer for end-of-turn — drained by the agent's own loop. There is no separate coordinator process and no database. What you get in exchange:
+SCORPIOX CODE takes the opposite trade. The interrupt and queue state is **in-memory**: two small, process-local buffers — one for the next tool-call boundary, one for end-of-turn — drained by the agent's own loop. There is no separate coordinator process and no database. What you get in exchange:
 
 - **No moving parts.** Delivery is the agent polling its own buffers and its own inbox directory. Nothing to deploy, nothing to keep in sync, nothing to restart.
 - **A durable channel without a database.** The part that must survive across processes — "a message from another program or machine" — is the **filesystem inbox**, not a queue table. The inbox is the durable surface; the in-memory buffers are just the fast path between polls.
 - **One submit path everywhere.** TUI Enter, the `~` prefix, a dropped file, the SCORPIO BOT HTTP route, and the DLL exports all funnel into the same classification. There is no per-surface queue to reason about.
 
+The consequence of the trade: SCORPIOX CODE's *live* interrupt/queue state is volatile — it lives as long as the process. If the process dies, in-flight notes in the buffers are lost, but anything already written to `inbox/` is not, because the filesystem is the source of truth for cross-process delivery. OpenCode's database-backed queue makes the live state durable at the cost of a persistent store and a leader to manage it.
+
 | Dimension | OpenCode v2 | SCORPIOX CODE |
 |-----------|-------------|---------------|
-| Where waiting messages live | Durable database table | In-memory buffers + filesystem inbox |
-| Coordination | Per-session run coordinator with coalesced wake-ups | The agent's own loop polls buffers + inbox |
-| Inspecting the pending set | Read the table / a queued-prompts view | List `inbox/` — the files *are* the queue |
-| "Stop it" | Dedicated interrupt route / **Escape** keybind | **ESC** in the TUI, `sx_interrupt()` in the API |
+| Where waiting messages live | Durable database-backed queue | In-memory buffers + filesystem inbox |
+| Coordination | Leader / queue-management layer (`leader-q`) | The agent's own loop polls buffers + inbox |
+| Cross-process delivery | Via the durable queue | Via the `inbox/` drop-in folder |
+| Inspecting the pending set | Read the queue / a management view | List `inbox/` — the files *are* the queue |
+| "Stop it" | Dedicated interrupt key | **ESC** in the TUI, `sx_interrupt()` in the API |
 | Durability of live notes | Survives restart (database) | Lost if the process dies; inbox files survive |
 | Per-surface queues | Central queue | None — one shared submit path |
-
-The consequence of the trade: SCORPIOX CODE's *live* interrupt/queue state is volatile — it lives as long as the process. If the process dies, in-flight notes in the buffers are lost, but anything already written to `inbox/` is not, because the filesystem is the source of truth for cross-process delivery. OpenCode's database-backed queue makes the live state durable and inspectable at the cost of a persistent store and a coordinator to manage it. If you want durability out of SCORPIOX CODE, write to the inbox — that is what it is for.
 
 ---
 
@@ -221,7 +232,7 @@ The consequence of the trade: SCORPIOX CODE's *live* interrupt/queue state is vo
 - **The inbox is polled one file per pass.** Pending files are sorted by stem and drained one at a time, so a name that sorts early wins the next pass. Stamp stems with a sortable prefix (a timestamp or zero-padded counter) if order matters.
 - **Write `.tmp`, then rename — always.** A file written directly to `<stem>.json` can be read half-complete; the atomic rename is what makes the channel safe for two processes. The SCORPIO BOT HTTP route does this for you.
 - **Oversized or malformed drops are consumed, not retried.** A JSON over 64 KB, or anything that is not valid JSON, is moved to `done/` and skipped — it will not sit there and be picked up on a later pass. Check `inbox/done/` when a message seems to have vanished.
-- **A 4 KB / 8 KB live buffer is a real bound.** The in-memory interrupt and queue buffers are fixed-size; when full, the message is dropped with a warning rather than silently corrupted. Large or numerous notes belong in the inbox, not the live buffers.
+- **The live buffers are fixed-size.** The in-memory interrupt and queue buffers have real bounds; when full, the message is dropped with a warning rather than silently corrupted. Large or numerous notes belong in the inbox, not the live buffers.
 - **Disabling `SCORPIOX_INBOX` disables only polling.** The flag turns off the folder channel; Enter, `~`, the DLL exports, and the SCORPIO BOT route are unaffected.
 
 ---
@@ -230,5 +241,4 @@ The consequence of the trade: SCORPIOX CODE's *live* interrupt/queue state is vo
 
 - [Remote Agent Control & Fleet Management with SCORPIO BOT](scorpiox-bot.md)
 - [Configuration and Profiles](scorpiox-env.md)
-- [Scheduled Callbacks and Autonomous Agent Loops](callbacks.md)
 - [Managing Agent Sessions with scorpiox-tmux](scorpiox-tmux.md)
