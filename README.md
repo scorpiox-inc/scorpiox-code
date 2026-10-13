@@ -6,8 +6,8 @@ High-performance native coding assistant with 100% local filesystem sessions.
 
 ## Architecture & Systems Engineering Truth
 
-- **Pure C99** — 93,000 lines of hand-crafted C99. No runtime, no interpreter, no JIT.
-- **78 standalone native C binaries** — Each capability compiles to its own self-contained executable.
+- **Pure C99** — 198,000 lines of hand-crafted C99. No runtime, no interpreter, no JIT.
+- **116 standalone native C binaries** — Each capability compiles to its own self-contained executable.
 - **Zero dependencies** — No Node.js, no Python, no Electron, no `npm` packages. One binary, statically linked.
 - **Sub-millisecond CLI startup** — No cold-start tax. The binary is always ready.
 - **100% local filesystem sessions** — Raw JSON transcripts on disk. Full offline auditability, replay, and wire-level traffic logging.
@@ -50,15 +50,9 @@ SCORPIOX CODE works with any major LLM backend. Each guide covers authentication
 | xAI Grok Build & SuperGrok Subscription | [docs/grok-provider.md](docs/grok-provider.md) |
 | Google Antigravity CLI Subscription (Gemini & Claude Sonnet on Cloud Code Assist) | [docs/antigravity-provider.md](docs/antigravity-provider.md) |
 | OpenAI Provider (compatible with llama.cpp, vLLM, SGLang, Ollama) | [docs/openai-provider.md](docs/openai-provider.md) |
+| OpenCode Zen Subscription (OAuth device-code login, no separate API key) | [docs/opencode-provider.md](docs/opencode-provider.md) |
+| Vertex AI Provider (Google Cloud Model Garden) | [docs/vertex-ai-provider.md](docs/vertex-ai-provider.md) |
 | Anthropic Direct Messages API | [docs/anthropic-provider.md](docs/anthropic-provider.md) |
-
----
-
-## Configuration
-
-SCORPIOX CODE uses a deterministic 5-tier configuration cascade: environment variables, project-level settings, user settings, system defaults, and compiled-in fallbacks — resolved in a fixed priority order.
-
-Full reference: [docs/scorpiox-env.md](docs/scorpiox-env.md)
 
 ---
 
@@ -79,6 +73,15 @@ Full reference: [docs/scorpiox-env.md](docs/scorpiox-env.md)
 | [docs/scorpiox-bot.md](docs/scorpiox-bot.md) | Headless fleet orchestration |
 | [docs/project-instructions.md](docs/project-instructions.md) | Instruction cascade |
 | [docs/privacy.md](docs/privacy.md) | Privacy policy |
+| [docs/git-worktrees.md](docs/git-worktrees.md) | Isolated git worktrees for parallel agent sessions |
+| [docs/identity-headers.md](docs/identity-headers.md) | Session identity headers for request grouping and cache correlation |
+| [docs/lazy-skill-loading.md](docs/lazy-skill-loading.md) | Lazy skill loading with on-demand catalog search |
+| [docs/reasoning-effort.md](docs/reasoning-effort.md) | Reasoning effort control per provider |
+| [docs/scorpiox-server.md](docs/scorpiox-server.md) | Built-in HTTP server, file-layout routing |
+| [docs/scorpiox-tmux.md](docs/scorpiox-tmux.md) | Managing agent sessions with scorpiox-tmux |
+| [docs/send-messages.md](docs/send-messages.md) | Sending messages to a running agent |
+| [docs/unshare.md](docs/unshare.md) | Native Linux container runtime for AI agents |
+| [docs/usage-observability.md](docs/usage-observability.md) | Token usage observability |
 
 ---
 
