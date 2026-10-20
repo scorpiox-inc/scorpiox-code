@@ -6,8 +6,8 @@ High-performance native coding assistant with 100% local filesystem sessions.
 
 ## Architecture & Systems Engineering Truth
 
-- **Pure C99** — 198,000 lines of hand-crafted C99. No runtime, no interpreter, no JIT.
-- **116 standalone native C binaries** — Each capability compiles to its own self-contained executable.
+- **Pure C99** — 202,000 lines of hand-crafted C99. No runtime, no interpreter, no JIT.
+- **119 standalone native C binaries** — Each capability compiles to its own self-contained executable.
 - **Zero dependencies** — No Node.js, no Python, no Electron, no `npm` packages. One binary, statically linked.
 - **Sub-millisecond CLI startup** — No cold-start tax. The binary is always ready.
 - **100% local filesystem sessions** — Raw JSON transcripts on disk. Full offline auditability, replay, and wire-level traffic logging.
