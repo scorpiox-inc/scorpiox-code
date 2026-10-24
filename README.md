@@ -6,11 +6,15 @@ High-performance native coding assistant with 100% local filesystem sessions.
 
 ## Architecture & Systems Engineering Truth
 
-- **Pure C99** — 202,000 lines of hand-crafted C99. No runtime, no interpreter, no JIT.
-- **119 standalone native C binaries** — Each capability compiles to its own self-contained executable.
-- **Zero dependencies** — No Node.js, no Python, no Electron, no `npm` packages. One binary, statically linked.
-- **Sub-millisecond CLI startup** — No cold-start tax. The binary is always ready.
+Measured from the source tree at commit `ce3b5cd`:
+
+- **Pure C99** — 201,123 lines of hand-crafted C across 220 source files (224,490 lines including 94 headers). No runtime, no interpreter, no JIT.
+- **119 standalone native C binaries** — Each capability compiles to its own self-contained executable target.
+- **Zero dependencies** — No Node.js, no Python, no Electron, no `npm` packages, no package manager.
+- **Sub-millisecond CLI startup** — No cold-start tax, no garbage collector, no VM warm-up.
 - **100% local filesystem sessions** — Raw JSON transcripts on disk. Full offline auditability, replay, and wire-level traffic logging.
+- **5-tier configuration cascade** — `DEFAULT -> GLOBAL -> USER -> PROJECT -> PROFILE`, with deterministic override semantics.
+- **Zero telemetry** — No usage tracking, no remote logging. Privacy enforced by architecture, not by policy.
 
 ---
 
@@ -40,7 +44,7 @@ curl -fsSL "https://get.scorpiox.net?platform=mac" | bash
 
 ## Supported AI Providers
 
-SCORPIOX CODE works with any major LLM backend. Each guide covers authentication, configuration, and advanced options.
+SCORPIOX CODE talks to major LLM backends directly. Each guide covers authentication, configuration, and advanced options.
 
 | Provider | Documentation |
 |---|---|
@@ -66,7 +70,7 @@ SCORPIOX CODE works with any major LLM backend. Each guide covers authentication
 | [docs/skills-system.md](docs/skills-system.md) | Dynamic skills cascade |
 | [docs/hooks-system.md](docs/hooks-system.md) | Lifecycle event hooks |
 | [docs/mcp.md](docs/mcp.md) | Model Context Protocol native client |
-| [docs/keepalive.md](docs/keepalive.md) | Draggable live popup & cache warming |
+| [docs/keepalive.md](docs/keepalive.md) | Draggable live popup and cache warming |
 | [docs/file-editing.md](docs/file-editing.md) | Deterministic line-based file editing |
 | [docs/data-privacy.md](docs/data-privacy.md) | Zero telemetry, zero external tracking |
 | [docs/traffic-logging.md](docs/traffic-logging.md) | Wire-level transparent HTTP traffic recording |
