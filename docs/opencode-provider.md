@@ -16,7 +16,7 @@ Docs for SCORPIOX CODE @ `e30b171`.
 | **You want the free contributor models** | Muse Spark, Nemotron, Ling, MiMo and friends at $0.00 per request |
 | **You don't want to manage a vendor API key** | No per-token API billing — requests draw on your OpenCode account |
 | **Headless / over SSH** | The device-code flow works over SSH: open a link, enter a code on any device — no browser needed on the box you run from |
-| **Driven by SCORPIO BOT** | The login splits into separate `--start` / `--poll` commands with no open TTY — see [Machine mode](#machine-mode-no-tty) |
+| **Driven by SCORPIOX BOT** | The login splits into separate `--start` / `--poll` commands with no open TTY — see [Machine mode](#machine-mode-no-tty) |
 
 If you are instead calling an OpenAI-compatible server with an API key (`OPENAI_API_KEY` plus `OPENAI_BASE_URL`), use `PROVIDER=openai`. The two are different billing models for overlapping wire formats — see [OpenCode vs. the OpenAI API-key provider](#opencode-vs-the-openai-api-key-provider).
 
@@ -326,7 +326,7 @@ SCORPIOX CODE talks to OpenCode in the OpenAI **Responses** wire format — stre
 
 ## Machine mode (no TTY)
 
-Sometimes you cannot hold a terminal open between "here is the link" and "approved" — a background agent, a CI step, or SCORPIO BOT's provider flow. For that, the login tool ships an **additive machine mode**: the same device-code flow split into separate, non-interactive commands that print a single line of JSON to stdout. Tokens are **never** printed — only status. Running the tool with no machine flag is the original interactive behaviour, unchanged.
+Sometimes you cannot hold a terminal open between "here is the link" and "approved" — a background agent, a CI step, or SCORPIOX BOT's provider flow. For that, the login tool ships an **additive machine mode**: the same device-code flow split into separate, non-interactive commands that print a single line of JSON to stdout. Tokens are **never** printed — only status. Running the tool with no machine flag is the original interactive behaviour, unchanged.
 
 | Flag | What it does |
 |------|--------------|
@@ -352,7 +352,7 @@ scorpiox-opencode-login --poll
 #   {"ok":true,"provider":"opencode","state":"done","logged_in":true,"path":"/home/you/.config/opencode/auth.json","profile":"superopencode","profile_created":true}
 ```
 
-And a status check, which is all SCORPIO BOT needs to see where a node stands:
+And a status check, which is all SCORPIOX BOT needs to see where a node stands:
 
 ```bash
 scorpiox-opencode-login --status

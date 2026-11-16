@@ -2,7 +2,7 @@
 
 **SCORPIOX, INC** publishes this policy in place of the old commercial-app privacy page. The old page described a service that collects, logs, and analyzes. That is no longer accurate. This page describes what the current architecture actually does, and the guarantee it gives you.
 
-The short version: **SCORPIOX CODE collects nothing by default, and cannot, by construction.** SCORPIO BOT gives you three explicit operational tiers, from fully self-hosted (zero collection) to optional, isolated, wipeable cloud compute. There are no tracking cookies, no ad trackers, no silent analytics, and no "we may collect log data in case of an error." If we say something is not collected, the code path that would collect it does not exist.
+The short version: **SCORPIOX CODE collects nothing by default, and cannot, by construction.** SCORPIOX BOT gives you three explicit operational tiers, from fully self-hosted (zero collection) to optional, isolated, wipeable cloud compute. There are no tracking cookies, no ad trackers, no silent analytics, and no "we may collect log data in case of an error." If we say something is not collected, the code path that would collect it does not exist.
 
 Docs for SCORPIOX CODE @ `e30b171`.
 
@@ -13,9 +13,9 @@ Docs for SCORPIOX CODE @ `e30b171`.
 There are two customer-facing surfaces, and they follow one rule: **nothing is collected unless you deliberately choose a tier that does it, and you always know which tier you are in.**
 
 - **SCORPIOX CODE** is the local coding agent. It is absolute zero: 100% local filesystem sessions, zero data collection, zero telemetry, zero analytics, zero cloud dependencies.
-- **SCORPIO BOT** is the remote-control and fleet layer. It has three explicit tiers, and the default one is self-hosted with zero collection. The two SCORPIO+ tiers are optional, named, and bounded.
+- **SCORPIOX BOT** is the remote-control and fleet layer. It has three explicit tiers, and the default one is self-hosted with zero collection. The two SCORPIO+ tiers are optional, named, and bounded.
 
-We separate the two because the guarantee is different for each. SCORPIOX CODE has no optional collection tier at all. SCORPIO BOT's optional tiers move only what each tier is for, and nothing more.
+We separate the two because the guarantee is different for each. SCORPIOX CODE has no optional collection tier at all. SCORPIOX BOT's optional tiers move only what each tier is for, and nothing more.
 
 ---
 
@@ -62,9 +62,9 @@ This is the single exception in an otherwise closed system, and it is closed by 
 
 ---
 
-## SCORPIO BOT: three explicit operational tiers
+## SCORPIOX BOT: three explicit operational tiers
 
-SCORPIO BOT lets you drive SCORPIOX CODE without a keyboard — from a browser, a script, or across a fleet of machines. It is a thin supervisor that wraps a running SCORPIOX CODE host and its local API and web dashboard. It does not modify the agent, and it does not add a collection mechanism to SCORPIOX CODE. What it does is let you choose where and how the control surface runs. That choice is the tier.
+SCORPIOX BOT lets you drive SCORPIOX CODE without a keyboard — from a browser, a script, or across a fleet of machines. It is a thin supervisor that wraps a running SCORPIOX CODE host and its local API and web dashboard. It does not modify the agent, and it does not add a collection mechanism to SCORPIOX CODE. What it does is let you choose where and how the control surface runs. That choice is the tier.
 
 | Tier | Where it runs | Data collection |
 |------|---------------|-----------------|
@@ -136,7 +136,7 @@ If any step surprises you — an unexpected host, a file outside your filesystem
 ## The bottom line
 
 - **SCORPIOX CODE is absolute zero.** 100% local filesystem sessions, no telemetry, no analytics, no cloud dependency. We cannot count active users, inspect prompts, or access code.
-- **SCORPIO BOT has three named tiers.** Default Self-Hosted is zero collection. The optional SCORPIO+ Relay is ephemeral transport, never logged, inspected, or sold. The optional SCORPIO+ Hosted Cloud Compute is isolated, execution-only, never trained on, never inspected, never sold, and wipeable anytime.
+- **SCORPIOX BOT has three named tiers.** Default Self-Hosted is zero collection. The optional SCORPIO+ Relay is ephemeral transport, never logged, inspected, or sold. The optional SCORPIO+ Hosted Cloud Compute is isolated, execution-only, never trained on, never inspected, never sold, and wipeable anytime.
 - **No tracking cookies, no ad trackers, no resale, and you control deletion** in every tier.
 
 You can run SCORPIOX CODE fully air-gapped, against your own inference, and it behaves exactly as it does on the open internet — because it was built to have nothing to send in the first place.

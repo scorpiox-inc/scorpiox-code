@@ -342,6 +342,6 @@ If you need upstream load balancing, HTTP/2 edge termination, or a mature module
 ## Related
 
 - [Configuration and Profiles](scorpiox-env.md) — the cascade every `SERVER_*` key resolves through, and where to put each one.
-- [Remote Agent Control & Fleet Management with SCORPIO BOT](scorpiox-bot.md) — the fleet built on this server and its mesh, with the same `?format=json` dialect.
+- [Remote Agent Control & Fleet Management with SCORPIOX BOT](scorpiox-bot.md) — the fleet built on this server and its mesh, with the same `?format=json` dialect.
 - [Native MCP 2.0 and OAuth 2.1](mcp.md) — the MCP client side, the `--mcp` server mode, and the head-to-head harness comparison.
 - [Privacy Policy and Data Architecture](privacy.md) — how the self-hosted, zero-collection deployment of these surfaces is structured.

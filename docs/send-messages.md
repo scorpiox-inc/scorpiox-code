@@ -2,7 +2,7 @@
 
 An agent that is in the middle of a turn is not frozen. You can still reach it — stop it, steer it, or leave a note for it to read when it is done. SCORPIOX CODE gives you one shared submission path for all of it, and it works the same whether you are typing at the keyboard, dropping a file on disk, calling an HTTP endpoint, or embedding the agent in your own application.
 
-This page covers the three submit modes, exactly how each behaves in the terminal, the drop-in session inbox, remote control through SCORPIO BOT, the public embedding API, and how the whole model compares to other harnesses.
+This page covers the three submit modes, exactly how each behaves in the terminal, the drop-in session inbox, remote control through SCORPIOX BOT, the public embedding API, and how the whole model compares to other harnesses.
 
 Docs for SCORPIOX CODE @ `e30b171`.
 
@@ -129,9 +129,9 @@ If a session runs inside a git worktree, SCORPIOX CODE dual-writes its session s
 
 ---
 
-## From SCORPIO BOT
+## From SCORPIOX BOT
 
-[SCORPIO BOT](scorpiox-bot.md) is the layer that drives a session without a keyboard. To send a message to a session that is already alive, you hit the same inbox over HTTP:
+[SCORPIOX BOT](scorpiox-bot.md) is the layer that drives a session without a keyboard. To send a message to a session that is already alive, you hit the same inbox over HTTP:
 
 ```
 POST /inbox?id=<session-id>&mode=auto
@@ -140,7 +140,7 @@ Content-Type: text/plain
 Fix the null check in auth.c and run the tests
 ```
 
-The `mode` query parameter is the same `auto` / `interrupt` / `queue` set as everywhere else. The **body is plain text** — the SCORPIO BOT layer writes it into the session inbox for you, so the atomic-rename handshake is handled for you rather than something you have to do by hand. A tilde prefix on the body is read as **queue**, which is the same `~` shorthand the TUI uses.
+The `mode` query parameter is the same `auto` / `interrupt` / `queue` set as everywhere else. The **body is plain text** — the SCORPIOX BOT layer writes it into the session inbox for you, so the atomic-rename handshake is handled for you rather than something you have to do by hand. A tilde prefix on the body is read as **queue**, which is the same `~` shorthand the TUI uses.
 
 The route waits briefly for the agent to actually consume the message, so the response tells you whether delivery happened rather than assuming it:
 
@@ -152,7 +152,7 @@ A `"consumed": false` result means "written, not yet picked up" — not "failed"
 
 For the *stop* case there is the escape/interrupt path: a signal that cancels the active turn, the remote equivalent of pressing **ESC**. And when you are driving the *terminal* rather than the agent — typing into a shell, sending raw keystrokes — that is the separate low-level input route. The rule of thumb: **inbox for the agent, terminal input for the shell.** If you are driving the model, send a message; if you are at the prompt, type.
 
-For the exact request/response shapes, streaming endpoints, and the rest of the remote surface, see [Remote Agent Control & Fleet Management with SCORPIO BOT](scorpiox-bot.md).
+For the exact request/response shapes, streaming endpoints, and the rest of the remote surface, see [Remote Agent Control & Fleet Management with SCORPIOX BOT](scorpiox-bot.md).
 
 ---
 
@@ -200,7 +200,7 @@ SCORPIOX CODE takes the opposite trade. The interrupt and queue state is **in-me
 
 - **No moving parts.** Delivery is the agent polling its own buffers and its own inbox directory. Nothing to deploy, nothing to keep in sync, nothing to restart.
 - **A durable channel without a database.** The part that must survive across processes — "a message from another program or machine" — is the **filesystem inbox**, not a queue table. The inbox is the durable surface; the in-memory buffers are just the fast path between polls.
-- **One submit path everywhere.** TUI Enter, the `~` prefix, a dropped file, the SCORPIO BOT HTTP route, and the DLL exports all funnel into the same classification. There is no per-surface queue to reason about.
+- **One submit path everywhere.** TUI Enter, the `~` prefix, a dropped file, the SCORPIOX BOT HTTP route, and the DLL exports all funnel into the same classification. There is no per-surface queue to reason about.
 
 The consequence of the trade: SCORPIOX CODE's *live* interrupt/queue state is volatile — it lives as long as the process. If the process dies, in-flight notes in the buffers are lost, but anything already written to `inbox/` is not, because the filesystem is the source of truth for cross-process delivery. OpenCode's database-backed queue makes the live state durable at the cost of a persistent store and a leader to manage it.
 
@@ -230,15 +230,15 @@ The consequence of the trade: SCORPIOX CODE's *live* interrupt/queue state is vo
 - **A leading `~` queues only while the agent is busy.** When the agent is idle, the same line starts a new turn like any other message — the `~` is stripped but does not change behaviour, because all three modes are "new turn" when nothing is running.
 - **`interrupt` and `queue` are timing, not delivery guarantees.** A queued note is delivered when the *current turn* ends; if you cancel that turn with **ESC**, the queue is still flushed as its own run afterward.
 - **The inbox is polled one file per pass.** Pending files are sorted by stem and drained one at a time, so a name that sorts early wins the next pass. Stamp stems with a sortable prefix (a timestamp or zero-padded counter) if order matters.
-- **Write `.tmp`, then rename — always.** A file written directly to `<stem>.json` can be read half-complete; the atomic rename is what makes the channel safe for two processes. The SCORPIO BOT HTTP route does this for you.
+- **Write `.tmp`, then rename — always.** A file written directly to `<stem>.json` can be read half-complete; the atomic rename is what makes the channel safe for two processes. The SCORPIOX BOT HTTP route does this for you.
 - **Oversized or malformed drops are consumed, not retried.** A JSON over 64 KB, or anything that is not valid JSON, is moved to `done/` and skipped — it will not sit there and be picked up on a later pass. Check `inbox/done/` when a message seems to have vanished.
 - **The live buffers are fixed-size.** The in-memory interrupt and queue buffers have real bounds; when full, the message is dropped with a warning rather than silently corrupted. Large or numerous notes belong in the inbox, not the live buffers.
-- **Disabling `SCORPIOX_INBOX` disables only polling.** The flag turns off the folder channel; Enter, `~`, the DLL exports, and the SCORPIO BOT route are unaffected.
+- **Disabling `SCORPIOX_INBOX` disables only polling.** The flag turns off the folder channel; Enter, `~`, the DLL exports, and the SCORPIOX BOT route are unaffected.
 
 ---
 
 ## Related
 
-- [Remote Agent Control & Fleet Management with SCORPIO BOT](scorpiox-bot.md)
+- [Remote Agent Control & Fleet Management with SCORPIOX BOT](scorpiox-bot.md)
 - [Configuration and Profiles](scorpiox-env.md)
 - [Managing Agent Sessions with scorpiox-tmux](scorpiox-tmux.md)

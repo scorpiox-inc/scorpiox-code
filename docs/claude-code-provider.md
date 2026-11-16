@@ -4,7 +4,7 @@ You have a **Claude Code CLI** subscription — a Claude Pro or Max plan, or a C
 
 This page walks through the session login, where the token is stored, how refresh works (and why there is nothing to manage), how to juggle several accounts with profiles (`/profile` and `/use`), how to drive a login without a TTY (**machine mode**), and how a Claude Code subscription differs from standard Anthropic API-key usage.
 
-Docs for SCORPIOX CODE @ `0cd528b`.
+Docs for SCORPIOX CODE @ `d100592`.
 
 > **The whole idea in one line:** run `scorpiox-claudecode-login`, approve in a browser, paste the code back — SCORPIOX CODE stores the OAuth tokens, writes a ready-to-use profile, and every later request renews its own short-lived access token from the stored refresh token. No API key, no per-token bill.
 
@@ -18,7 +18,7 @@ Docs for SCORPIOX CODE @ `0cd528b`.
 | **You don't have (or don't want) an Anthropic API key** | Requests draw on your subscription's usage windows, not per-token billing |
 | **You share one login across several machines** | The token can be fetched over SSH, HTTP, or a raw TCP socket instead of a local file |
 | **Headless / over SSH** | The login is paste-code based: approve in a browser on any device, paste the code back into the terminal |
-| **Driven by SCORPIO BOT** | The login splits into separate `--start` / `--finish` commands with no open TTY — see [Machine mode](#machine-mode-no-tty) |
+| **Driven by SCORPIOX BOT** | The login splits into separate `--start` / `--finish` commands with no open TTY — see [Machine mode](#machine-mode-no-tty) |
 
 If you are instead calling Anthropic with an **API key**, that is a different provider: `PROVIDER=anthropic`, described in [Direct Anthropic API & Custom Endpoints](anthropic-provider.md). The two run the same models on different billing models — see [Claude Code subscription vs. standard API-key usage](#claude-code-subscription-vs-standard-api-key-usage) below.
 
@@ -376,7 +376,7 @@ scorpiox-config --verbose  # print key values (PROVIDER, CLAUDE_CODE_TOKEN_SOURC
 
 ## Machine mode (no TTY)
 
-Sometimes you cannot hold a terminal open between "here is the URL" and "paste the code" — a background agent, a CI step, or SCORPIO BOT's provider flow. The login ships an **additive machine mode**: the same PKCE flow split into separate, non-interactive commands that print a single line of JSON to stdout. Tokens are **never** printed — only status. Running the tool with no machine flag is the original interactive behaviour, unchanged.
+Sometimes you cannot hold a terminal open between "here is the URL" and "paste the code" — a background agent, a CI step, or SCORPIOX BOT's provider flow. The login ships an **additive machine mode**: the same PKCE flow split into separate, non-interactive commands that print a single line of JSON to stdout. Tokens are **never** printed — only status. Running the tool with no machine flag is the original interactive behaviour, unchanged.
 
 | Flag | What it does |
 |------|--------------|
@@ -460,7 +460,7 @@ Rule of thumb: **you have a subscription, use `claude_code`. You have an API key
 - **`CLAUDE_CODE_TOKEN_SOURCE` has to say `local` for a personal login.** The compiled-in default is `local`, but the sample `scorpiox-env.txt` shipped beside the binaries sets `tcp`, and a deployed copy of it outranks the built-in default. If SCORPIOX CODE cannot find a token, run `scorpiox-config --verbose` and check which tier `CLAUDE_CODE_TOKEN_SOURCE` came from — then set `local` in your profile, which beats every base file.
 - **The login command and the provider are separate.** `scorpiox-claudecode-login` writes the credential file; it does not switch your session. Activate `claude_code` with `/profile` (or set `PROVIDER` yourself) before SCORPIOX CODE uses it.
 - **No login means no token.** `CLAUDE_CODE_TOKEN_SOURCE=local` reads `~/.claude/.credentials.json`. If you have never logged in, that file does not exist and every request fails with a token error. Run the login first.
-- **A profile created by a piped login never happens.** The interactive profile offer is skipped when stdin is not a terminal. In scripts and SCORPIO BOT flows, pass `--create-profile` with `--finish`, or write the profile by hand.
+- **A profile created by a piped login never happens.** The interactive profile offer is skipped when stdin is not a terminal. In scripts and SCORPIOX BOT flows, pass `--create-profile` with `--finish`, or write the profile by hand.
 - **Named accounts need an explicit pointer.** `--name work` writes `~/.claude/accounts/work.json`, and nothing uses it until a profile sets `CLAUDE_CODE_CREDENTIALS_FILE` to that path. Refreshing a named account needs the same pointer passed to the refresh tool (`--credentials-file`), otherwise it refreshes the default credential file.
 - **`CLAUDE_CODE_API_URL` is a domain, not a URL.** The path is appended automatically; writing a full `https://...` address there produces a malformed endpoint. If you need to name a full endpoint, that is the Anthropic provider's job.
 - **Proxy mode is off by default.** Setting `CLAUDE_CODE_PROXY_URL` alone does nothing until `CLAUDE_CODE_PROXY_ENABLED=1`. And with strict mode off, a broken proxy silently degrades to direct Anthropic — if you *meant* to route through the proxy, set `CLAUDE_CODE_PROXY_STRICT=1` so a dead proxy is loud.

@@ -1,6 +1,6 @@
 # Remote Agent Control & Fleet Management with SCORPIOX BOT
 
-Running a SCORPIOX CODE agent at your own keyboard is one thing. Running a *fleet* of them — across several machines, several projects, several people — and being able to see what each one is doing, type into any one of them, and kick off new work from a phone or a script, is a different product entirely. **SCORPIO BOT** is that product: a thin, always-on control surface that wraps your running SCORPIOX CODE sessions so you can drive them remotely, watch their output live, and manage every machine they run on from one screen.
+Running a SCORPIOX CODE agent at your own keyboard is one thing. Running a *fleet* of them — across several machines, several projects, several people — and being able to see what each one is doing, type into any one of them, and kick off new work from a phone or a script, is a different product entirely. **SCORPIOX BOT** is that product: a thin, always-on control surface that wraps your running SCORPIOX CODE sessions so you can drive them remotely, watch their output live, and manage every machine they run on from one screen.
 
 It is built from two deliberately small, pure-C programs:
 
@@ -11,7 +11,7 @@ Neither program modifies SCORPIOX CODE. They read the same session directories t
 
 Docs for SCORPIOX CODE @ `e30b171`.
 
-> **The whole idea in one line:** SCORPIO BOT turns every SCORPIOX CODE session into something you can list, stream, type into, and spawn from any browser or script — and groups many machines into one fleet, from fully self-hosted to heads-behind-NAT via reverse tunnels.
+> **The whole idea in one line:** SCORPIOX BOT turns every SCORPIOX CODE session into something you can list, stream, type into, and spawn from any browser or script — and groups many machines into one fleet, from fully self-hosted to heads-behind-NAT via reverse tunnels.
 
 ---
 
@@ -166,7 +166,7 @@ Printable text, including full UTF-8, is sent literally, so a word like `Enter` 
 
 ### 6. Answer the agent, not just prompt it
 
-An agent does not only receive prompts; it asks questions and requests permission. SCORPIO BOT exposes those as routes too, so a remote client can answer them:
+An agent does not only receive prompts; it asks questions and requests permission. SCORPIOX BOT exposes those as routes too, so a remote client can answer them:
 
 - **`/askuser`** — the agent's "question for a human" tool. Read the pending question, post an answer.
 - **`/permission`** — the agent's "may I run this command" gate. Read the pending request, approve or deny.
@@ -420,7 +420,7 @@ The web tier (:8155) mirrors the session-control, observation, input, telemetry,
 
 ## The bottom line
 
-SCORPIO BOT gives SCORPIOX CODE two remote surfaces over one contract. The **API** is the thing you build against: start a session, submit prompts, stream the terminal, read the conversation, watch telemetry, drive the agent's questions and callbacks, and stop it — all plain REST and SSE. The **web tier** is the thing you look at: a fleet dashboard that spans every node you can reach, with a full chat, a real two-way terminal, and the work surfaces — resume, changes, preview — right beside them. Node files, the SCORPIO+ cloud registry, and reverse-tunnel mesh give you three ways to assemble a fleet, including machines behind NAT with no inbound port. And because both tiers are driven by the same JSON endpoints, a human in a browser and an agent in a loop are doing the identical thing.
+SCORPIOX BOT gives SCORPIOX CODE two remote surfaces over one contract. The **API** is the thing you build against: start a session, submit prompts, stream the terminal, read the conversation, watch telemetry, drive the agent's questions and callbacks, and stop it — all plain REST and SSE. The **web tier** is the thing you look at: a fleet dashboard that spans every node you can reach, with a full chat, a real two-way terminal, and the work surfaces — resume, changes, preview — right beside them. Node files, the SCORPIO+ cloud registry, and reverse-tunnel mesh give you three ways to assemble a fleet, including machines behind NAT with no inbound port. And because both tiers are driven by the same JSON endpoints, a human in a browser and an agent in a loop are doing the identical thing.
 
 ---
 
@@ -428,6 +428,6 @@ SCORPIO BOT gives SCORPIOX CODE two remote surfaces over one contract. The **API
 
 - [Configuration and Profiles in SCORPIOX CODE](openai-provider.md) — the model and settings presets a remote session launches under.
 - [Session Identity Headers](identity-headers.md) — the stable identifiers the same sessions carry upstream.
-- [Privacy Policy and Data Architecture](privacy.md) — the three SCORPIO BOT tiers, from self-hosted zero-collection to optional cloud compute.
-- [Using the /keepalive Command](keepalive.md) — the cache keep-alive that SCORPIO BOT exposes and controls remotely.
+- [Privacy Policy and Data Architecture](privacy.md) — the three SCORPIOX BOT tiers, from self-hosted zero-collection to optional cloud compute.
+- [Using the /keepalive Command](keepalive.md) — the cache keep-alive that SCORPIOX BOT exposes and controls remotely.
 - [Native MCP 2.0 and OAuth 2.1](mcp.md) — a different tool surface with its own discovery story.

@@ -297,5 +297,5 @@ Either way the container is built from the image, your project is mounted in, th
 
 - [Managing Agent Sessions with scorpiox-tmux](scorpiox-tmux.md) — the dashboard that launches every session on this runtime.
 - [Configuration and Profiles](scorpiox-env.md) — the cascade the `TMUX_*` keys live in.
-- [Remote Agent Control and Fleet Management with SCORPIO BOT](scorpiox-bot.md) — drive the same sessions from anywhere.
+- [Remote Agent Control and Fleet Management with SCORPIOX BOT](scorpiox-bot.md) — drive the same sessions from anywhere.
 - [Privacy Policy & Data Architecture](privacy.md) — what stays on your machine, including inside these containers.
