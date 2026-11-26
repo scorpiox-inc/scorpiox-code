@@ -1,243 +1,92 @@
 # Scheduled Callbacks and Autonomous Agent Loops
 
-An agent that stops when you stop is only half an agent. SCORPIOX CODE can keep a session moving on its own: it schedules a **callback** — a message plus a delay — and when the delay runs out, that message is delivered back into the conversation exactly as if you had typed it. The loop wakes up, does the next unit of work, and can schedule the one after that. Nobody has to type "continue".
+You told the agent to wait for a build to finish, or to keep checking a queue until a job shows up, and now you are staring at a terminal that has nothing to do. Or you want a long-running task to tick forward on its own — poll, retry, re-check — without you typing a nudge every few minutes. **Scheduled callbacks** in SCORPIOX CODE are that mechanism: a timer the agent sets for itself that later sends a message back into the conversation, waking the agent loop again so it can pick up where it left off. No user intervention, no lost context, no re-priming the session.
 
-That single mechanism is what powers **auto-pilot** (the agent carries a multi-step job forward turn after turn), **polling** (check a status every N seconds until it changes), and **long-running work** (fire a follow-up so a background job gets collected). A callback is not a background process and not a webhook: it is a message with a start time, delivered to the same agent loop you are already talking to.
+It is deliberately simple: the agent schedules a future message, the session waits, and when the time comes the message re-enters the conversation exactly as if you had typed it — and the agent responds. The same session, the same context, the same conversation. That is what turns a one-shot reply into an autonomous loop.
 
-You meet callbacks from two sides:
+Docs for SCORPIOX CODE @ `655c38f`.
 
-- **The agent** manages its own timers through the built-in `SetCallback` tool — scheduling, listing, and cancelling as it works.
-- **You** watch and steer them from the terminal with the `/callbacks` command and its popup, and glance at the `[CB:n]` status-bar indicator.
-
-Docs for SCORPIOX CODE @ `0cd528b`.
-
-> **The whole idea in one line:** a callback is a self-addressed reminder — the agent writes down what to do next and when, goes idle, and the timer delivers the note back into the conversation at the right moment, which starts a fresh turn without you.
+> **The whole idea in one line:** the agent schedules a timed message, the session waits, and the message comes back into the conversation to re-awaken the agent — so work can poll, retry, and run ahead on its own.
 
 ---
 
-## The three moving parts
+## What it is (and what it is not)
 
-| Part | What happens |
-|------|--------------|
-| **Schedule** | A message, a delay, and a repeat count are stored in one of eight timer slots. |
-| **Fire** | When the deadline passes and the agent is idle, the stored message enters the conversation as a normal user turn. The agent responds to it with the full tool set. |
-| **Repeat** | After each fire the timer re-arms with the same delay and counts one repeat down. At zero it retires itself; `-1` means forever. |
-
-Limits up front:
-
-| Boundary | Value |
-|----------|-------|
-| Active timers | **8** (slot IDs 0–7). A ninth schedule is refused. |
-| Delay per fire | **1–3600 seconds** — one second to one hour. |
-| Message size | Up to **2048 characters**. |
-| Repeat count | Default **20**; `-1` for infinite. |
-| When it can fire | Only while the agent is **idle** and callbacks are **not paused**. |
-
-Two properties are worth internalizing before you lean on this:
-
-- **A fire is a real turn, not a notification.** It costs a normal request, and the agent can use tools in response. Budget repeats accordingly: 20 fires at 30 seconds is roughly ten minutes of polling, not a bargain.
-- **The message is the whole instruction.** Whatever the timer carries is what the agent acts on, so make each message self-contained — what to check, what to do in each outcome, and when to cancel the timer. A vague message makes a repeating timer check nothing forever.
+- **A message back into the conversation, not a side channel.** When a callback fires, its text is delivered as an ordinary user message in the current session and the agent responds to it. It keeps the full conversation context — it is not a fresh session, not a webhook, not an out-of-band event you have to go read somewhere else.
+- **Scheduled by the agent, for the agent.** You do not configure a list of timers by hand. The agent decides when to schedule one and what the message should say, using the built-in `SetCallback` tool. You only step in if you want to watch, pause, or cancel.
+- **For work that genuinely needs to wait.** Builds, uploads, deployments, queues, rate limits, a service that is warming up. If the answer is not ready yet, the agent can stop, schedule a check-back a few minutes out, and do other useful work in the meantime instead of tight-polling.
+- **Bounded and honest.** There is a hard cap on how many timers can be active at once, the delay is bounded, and every timer shows its slot, its remaining time, and how many repeats it has left, so you always know what is armed and when it will fire.
+- **Pausable, and it survives the session.** Timers are persisted with the session, and you can pause them all at once and resume later without the paused ones firing in a burst the instant you resume.
 
 ---
 
 ## The `SetCallback` tool
 
-`SetCallback` is a built-in tool, on by default (`TOOL_SETCALLBACK=1`). One parameter, `action`, selects what it does; the remaining parameters depend on that choice.
+This is the built-in tool the agent uses to manage its own timers. It has three actions: **`set`**, **`list`**, and **`cancel`**.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `action` | string | yes | `set`, `list`, or `cancel`. Omitted means `set`. |
-| `message` | string | for `set` | The text delivered back into the conversation when the timer fires. |
-| `delay_seconds` | integer | for `set` | Seconds to wait before firing. Must be between 1 and 3600. |
-| `repeat_count` | integer | no | How many times to fire before the timer retires. Default **20**; `-1` fires forever. The timer re-schedules itself with the same delay after every fire. |
-| `callback_id` | integer | for `cancel` | Which slot to cancel. **Omit to cancel all.** |
+### Scheduling a callback (`set`)
 
-### `set` — schedule a timer
+To schedule, the agent provides:
 
-```json
-{
-  "action": "set",
-  "message": "Check the deploy job. If it succeeded or failed, report and cancel this callback. Otherwise report nothing new.",
-  "delay_seconds": 120,
-  "repeat_count": 30
-}
-```
+- **`action`** — `set`. (This is also the default, so an omitted action schedules.)
+- **`message`** — the text to send back into the conversation when the timer fires. This is the prompt the agent will act on. Make it specific: "check whether the build finished and report the result."
+- **`delay_seconds`** — how long to wait, between **1 and 3600** seconds.
+- **`repeat_count`** — how many times the callback fires before it is removed. Defaults to **20**. Use **`-1`** for infinite, in which case it keeps re-arming itself after every fire.
 
-The confirmation spells out the cadence:
+When it fires, the message is delivered to the conversation and the agent responds. If `repeat_count` is still greater than zero, the timer re-schedules itself with the same delay and fires again — that is how a polling loop works: schedule, wait, act, schedule again.
 
-```
-Callback scheduled: fires every 120s, repeats 30 times.
-```
+A session can hold up to **8 active callbacks** at once. If all slots are full, a new `set` is rejected until one frees up.
 
-With `repeat_count: -1`:
+### Listing active callbacks (`list`)
 
-```
-Callback scheduled: fires every 120s, repeats infinitely.
-```
+`list` reports every active timer with its **slot id**, the message (truncated if long), the **time until it fires**, and how many **repeats remain** (or `infinite`). The agent uses this to keep track of what it has armed; you can ask for it at any time, and the `/callbacks` popup below shows the same state in the UI.
 
-Refusals are explicit, so the agent can correct itself mid-loop:
+### Cancelling callbacks (`cancel`)
 
-| Situation | Message |
-|-----------|---------|
-| No `message` | `Error: missing message parameter` |
-| Delay out of range | `Error: delay_seconds must be between 1 and 3600 (got 7200)` |
-| All 8 slots taken | `Error: all callback slots full (max 8)` |
-| No timer support (browser build) | `Error: callback slots not available` |
-
-### `list` — inspect what is running
-
-```json
-{ "action": "list" }
-```
-
-```
-Active callbacks (2/8):
-  [0] "Check the deploy job. If it succeeded or failed, report and cancel..." - fires in 0m12s (29 left)
-  [3] "Check disk usage on /tmp" - fires in 1m00s (infinite)
-```
-
-The bracketed number is the slot ID — the same `callback_id` you would pass to `cancel`. With nothing scheduled it returns `No active callbacks.`
-
-### `cancel` — stop timers
-
-Cancel one slot by ID:
-
-```json
-{ "action": "cancel", "callback_id": 0 }
-```
-
-```
-Cancelled callback slot 0: "Check the deploy job. If it succeeded or f..."
-```
-
-Or clear everything by omitting the ID:
-
-```json
-{ "action": "cancel" }
-```
-
-```
-Cancelled 2 callbacks.
-```
-
-Bad IDs fail loudly rather than silently: `Error: callback_id 5 out of range (max 7)` for a slot that does not exist, and `Error: callback slot 3 is not active` for one that already fired out or was cancelled.
+- Cancel one: pass the `callback_id` of the specific slot (the number you saw in `list` or the popup).
+- Cancel all: omit `callback_id` and every active timer is removed.
 
 ---
 
-## How firing works
+## A typical autonomous loop
 
-The scheduler is deliberately boring, and that is what makes it safe to lean on.
+A realistic pattern, the kind the agent reaches for on its own:
 
-**Fires happen when the loop is idle.** The timer table is checked only when no agent run is in flight. If a deadline arrives while the agent is still working, the fire is deferred about five seconds and you see `[Callback] Deferred 5s — agent busy` in the transcript. Nothing is dropped; the timer waits for a free moment. Several timers coming due at once cannot stampede either — the busy check holds them back instead of racing.
+1. **Do the first step.** Kick off the work — start a build, submit a job, fire the first check.
+2. **If it is not ready, stop and schedule.** Instead of looping on the same command, the agent calls `SetCallback` with a sensible delay (for example 180 seconds) and a message like "re-check the build status now." It then does other useful work or simply waits.
+3. **The message returns.** After the delay, the scheduled text re-enters the conversation and the agent acts on it — checking again, reporting success, or scheduling one more tick.
+4. **It stops when done.** The agent either stops scheduling, or the repeat count runs out and the timer retires on its own.
 
-**Overdue timers re-base instead of burst-firing.** When an agent run finishes, every timer whose deadline passed during the run is pushed forward by one full delay. A 30-second timer set mid-run does not fire instantly the moment the run ends — it fires a full 30 seconds later, and the corrected countdown is written back so anything watching the session sees the real next-fire time.
-
-**Repeats re-arm from the moment they fire.** `delay_seconds: 120` with `repeat_count: 30` is 30 fires spaced 120 seconds apart, counted from each fire. When the count reaches zero the slot retires itself — the final fire still delivers its message.
-
-**The fired message is visible as a turn.** The transcript shows `[Callback] Timer fired`, then the message itself as the next user turn, and the agent answers it like any other prompt.
-
-**Everything an agent run does still applies.** A callback-driven run updates the usage readouts live (so a multi-hour auto-pilot round does not freeze the token figures) and handles context compaction the same way an interactive run does — a self-running session swaps into a fresh window instead of dying on a context-limit error.
-
-**The other auto-continue mechanisms step aside.** The pending-task reminder that normally nudges a session back on is suppressed while a callback is active — the scheduled message *is* the resume, and both nudging at once would just keep the loop from ever idling. And when the opt-in loop-detection guard is enabled (`LOOP_DETECTION=1`), the warning an agent receives for repeating an identical command explicitly points at `SetCallback` as the right alternative: schedule a check-back instead of tight-looping.
+This is what lets a single session babysit a long-running task: no re-typing, no context loss, no "why did it stop?" The agent that set the timer is the same agent that picks it up.
 
 ---
 
-## Managing timers from the terminal
+## The `/callbacks` command and its popup
 
-`/callbacks` is your control surface — the way to see and manage timers without asking the model to do it for you.
+Type **`/callbacks`** in the terminal to toggle the **Callbacks** popup over the conversation. It is a small, draggable window that shows every active timer in real time.
 
-| Command | Effect |
-|---------|--------|
-| `/callbacks` | Toggle the popup open or closed |
-| `/callbacks on` | Show the popup |
-| `/callbacks off` | Hide the popup |
-| `/callbacks pause` | Freeze every timer — nothing fires until you resume |
-| `/callbacks resume` | Unfreeze, and re-base overdue timers so nothing fires instantly |
+- **The title bar** reads the count of active callbacks, for example `Callbacks (3 active)`, and a `[X]` button closes the popup.
+- **Each row** shows the slot id, a preview of the message (truncated with `...`), the remaining time until it fires (for example `2m05s`), and the repeats left (a number, or `inf` for infinite).
+- **Empty state** reads `No active callbacks` when nothing is armed.
+- **Paused state** shows `Callbacks (n active) PAUSED` in the title bar.
 
-The four sub-arguments are offered as you type, so you never have to memorize them. A stray argument gets `Usage: /callbacks [on|off|pause|resume]`.
+The command also takes subcommands:
 
-### The popup
+- **`/callbacks`** — toggle the popup open or closed.
+- **`/callbacks on`** / **`/callbacks off`** — explicitly show or hide the popup.
+- **`/callbacks pause`** — pause all timers. They are frozen and will not fire while paused.
+- **`/callbacks resume`** — resume them. Any timer whose deadline passed while paused is re-based to fire again after its original delay, rather than all firing at once the moment you resume.
 
-The popup is a small draggable overlay — grab its title bar to move it, click `[X]` to close. One line per active timer:
-
-```
- Callbacks (2 active)
- [0] "Check the deploy job; report s..."  0m12s (29)
- [3] "Check disk usage on /tmp"           1m00s (inf)
-```
-
-Each line shows the slot index, a truncated message preview, the time until the next fire, and the fires remaining (`inf` when the timer repeats forever). An empty table reads `No active callbacks`. Pausing turns the title into `Callbacks (2 active) PAUSED`.
-
-> **Pausing is not cancelling.** `pause` freezes the firing clock and `resume` starts it again with the schedule intact; only `cancel` removes a timer. Pause is a switch on the running session, so it does not survive a restart.
-
-### The status bar and stats
-
-Even with the popup closed, the status bar shows a compact indicator whenever timers are active: `[CB:2 2:14]` means two active callbacks with the next one due in 2 minutes 14 seconds (under a minute it reads `[CB:1 45s]`). The same numbers are mirrored to the session's `stats.json` under a `callbacks` block — `active_count`, `next_fire_ms` (epoch, `0` when none), and `remaining_s` — which is what scripts and dashboards should read. See [Token Usage Observability](usage-observability.md).
+While at least one callback is active, the status bar also shows a compact indicator such as **`[CB:2 04:10]`** — two active timers, the next one firing in four minutes ten seconds.
 
 ---
 
-## Where timers live
+## What to keep in mind
 
-Timer state is a small JSON document in the session folder — `.scorpiox/sessions/<session>/callbacks.json`:
-
-```json
-{
-  "rev": 12,
-  "updated_ms": 1759712400123,
-  "paused": false,
-  "slots": [
-    {"id":0,"active":true,"message":"Check the deploy job; report and cancel if done.","delay_ms":120000,"repeat_count":29,"fire_at_ms":1759712520000}
-  ]
-}
-```
-
-Every writer — the agent's tool handler, the terminal tick, the embedded engine, a remote client — reads the file, modifies it, bumps `rev`, and atomically renames it into place. Every reader polls cheaply and re-adopts when `rev` moves. Timestamps are wall-clock epoch milliseconds, so the countdown is correct across processes and machines, and a torn write is never visible.
-
-Four consequences fall out of that:
-
-- **Timers survive a restart.** Resume a session and its timers come back with it; any that came due while you were away fire as soon as the loop is idle. Start a brand-new session and you start with an empty table.
-- **Timers ride along across session swaps.** `/compact`, `/resume`, and `/clear` all rotate the session folder, and the timer file is re-bound to the new folder with the live schedule carried over — so an auto-pilot loop keeps its timers through a compaction instead of silently losing them. This is also what keeps the remote view honest: before this re-bind, the agent kept writing the *old* session's file after a swap, and the SCORPIO BOT Callbacks panel would show `No active callbacks` for slots that were alive and ticking.
-- **Other processes can drive it.** Anything that can read and write that file — a remote bot API, a host application, your own script — can list, schedule, edit, or cancel timers, and the running session picks the changes up between turns. A timer scheduled remotely fires even though no tool call ever made it. See [SCORPIO BOT](scorpiox-bot.md).
-- **Worktrees stay consistent.** Inside a git worktree the file is dual-written: once under the worktree's session folder and once under the main repository's, so tooling watching the main repo still sees the schedule. A worktree `/resume` can also pull in a session that only exists in the main checkout's store, and the timer file follows it there.
-
-The embedded-engine form factor — host applications that load the agent as a library — uses the same file. A status thread checks it once a second, and a fired timer's message is queued through the exact path a host-supplied message takes, so a host cannot tell a callback from a user's own input.
+- **Bounded, on purpose.** Up to 8 concurrent timers, delays from 1 to 3600 seconds, repeat counts up to 1000 (or `-1` for infinite). These limits keep an autonomous loop from spinning out of control.
+- **It is a real wake-up, not a notification.** The scheduled message becomes a live user message that the agent acts on. If the session is busy with another run in flight, the firing is deferred briefly so the messages do not race each other, then it proceeds.
+- **Watch it from the popup.** `/callbacks` is your dashboard: see what is armed, when it fires, how many repeats are left, and pause or resume the whole set without leaving the conversation.
 
 ---
 
-## Recipes
-
-**Poll a deployment without burning tokens on a tight loop.** Have the agent start the deploy, then schedule `delay_seconds: 120, repeat_count: 30` with a message like *"Check the deploy status; if it succeeded or failed, cancel this callback and report; otherwise say nothing new."* The agent checks once every two minutes instead of hammering the endpoint.
-
-**Watchdog a long build.** `delay_seconds: 600, repeat_count: -1` with *"Confirm the build is still progressing; if it stalled, diagnose and cancel this callback."* Cancel it when the build is done, or let it run and watch the popup.
-
-**Auto-pilot a work queue.** One timer, `delay_seconds: 60, repeat_count: -1`, message *"Pick the next item from TODO.md, do it, mark it done. If nothing is left, cancel this callback."* The agent works one item per round and shuts itself down when the queue empties.
-
-**A single-shot nudge.** `repeat_count: 1` turns any timer into a one-shot: fire once, deliver the message, retire. Useful for "rerun the tests in 20 minutes and tell me if they are green."
-
-**Pair it with background tasks.** A background command runs a process and returns output later, but the agent still has to be told to look at it. A callback *is* the telling: start the long job in the background, schedule a check-back, and the loop collects the result on its own.
-
----
-
-## Gotchas
-
-- **Eight slots is a hard limit.** Scheduling a ninth fails with `all callback slots full (max 8)`. For high-frequency work, run fewer longer-lived timers rather than many overlapping ones — and cancel what you no longer need (`/callbacks` shows which slots are idle).
-- **The delay is capped at one hour.** For longer waits, fire a short timer and have the agent re-schedule the next hop. That also gives it a chance to look at real state between hops instead of sleeping blind.
-- **`repeat_count` counts fires, not seconds.** Default 20. `-1` is forever; `1` is a one-shot. A timer retires itself when the count runs out, and its final fire still delivers.
-- **Timers fire only while idle.** Never mid-turn. A deadline that lands during a run is deferred (about five seconds) or re-based to one full delay after the run finishes, so you never get a stampede of instant fires.
-- **Disabling the tool does not disarm the timers.** `TOOL_SETCALLBACK=0` or `/disable_tool SetCallback` stops new scheduling; timers already on the books keep firing until they are cancelled, repeat out, or paused.
-- **The message is the whole instruction.** The agent acts on it exactly as if you had typed it. Write what to check, what to do in each outcome, and when to cancel — otherwise a repeating timer happily checks nothing forever.
-- **`/clear` does not cancel timers.** Clearing the conversation rotates the session folder and carries the live schedule into it; cancel explicitly, or use `/callbacks pause` while you reorganize.
-- **Pause does not survive a restart.** It is a switch on the running session. Cancelled and fired timers, however, are recorded in the session file, so what you see after resuming is what was actually left running.
-- **Cancelling by ID needs the right slot.** Slot IDs come from `SetCallback` with `action: "list"` or from the popup's `[n]` prefix. Cancelling without an ID clears every timer, which is rarely what you want mid-loop.
-- **Nothing fires in the browser build.** The browser target has no timer slots; `SetCallback` reports `callback slots not available` there. Native and embedded runs are unaffected.
-
----
-
-## Related
-
-- [Configuration and Profiles](scorpiox-env.md) — where `TOOL_SETCALLBACK` sits in the configuration cascade, and how to disable the tool per project or per profile.
-- [Token Usage Observability](usage-observability.md) — the `[CB:n]` status-bar indicator and the `callbacks` block in `stats.json`.
-- [SCORPIO BOT](scorpiox-bot.md) — listing, scheduling, and cancelling the same timers remotely over the API and web dashboard.
-- [Using the /keepalive Command](keepalive.md) — the other idle-time timer: it pings to keep the prompt cache warm rather than to wake the agent.
-- [Conversation Compaction](conversation-compaction.md) — how a long auto-pilot loop survives its own context growth.
-- [Folder-Based Event Hooks](hooks-system.md) — for deterministic reactions to lifecycle events; timers are the right tool for delayed and recurring work instead.
+*Related: the agent's polling guidance nudges it toward `SetCallback` when it detects it is tight-looping on a command whose result will not change until something external happens — one scheduled check-back beats many instant polls.*

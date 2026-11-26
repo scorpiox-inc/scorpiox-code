@@ -1,10 +1,10 @@
 # Direct Anthropic API & Custom Endpoints in SCORPIOX CODE
 
-Have an Anthropic API key and want to pay per token instead of running through a subscription? Or you operate an Anthropic-compatible gateway and need SCORPIOX CODE to talk to something other than Anthropic's own servers? The **Anthropic provider** (`PROVIDER=anthropic`) does both. It speaks the Anthropic Messages API directly with a plain `x-api-key` header, and it lets you retarget the endpoint to almost anything that speaks the same protocol: the official API, a self-hosted gateway, a corporate relay, or a third-party proxy with its own key and URL.
+Have an Anthropic API key and want to pay per token instead of using a subscription? Or you run an Anthropic-compatible gateway and need to point SCORPIOX CODE somewhere other than Anthropic's own servers? The **Anthropic provider** (`PROVIDER=anthropic`) does both. It speaks the Anthropic Messages API directly with a plain `x-api-key` header, and it lets you retarget the endpoint to almost anything that speaks the same protocol: Anthropic's official API, a self-hosted gateway, a corporate relay, or a third-party proxy with its own key and URL.
 
-This page is the full how-to: the four authentication modes (`official`, `custom`, `zai`, `antigravity`), the keys that make each one work, how model aliases and version overrides resolve, what actually goes on the wire, and where this provider sits relative to the Claude Code subscription provider and the Google Cloud Claude provider.
+This page is the full how-to: the four authentication modes (`official`, `custom`, `zai`, `antigravity`), the keys that make each one work, how to set them up quickly with the guided wizard, how model aliases and version overrides resolve, and where this provider sits relative to the Claude Code subscription provider and the Google Cloud Claude provider.
 
-Docs for SCORPIOX CODE @ `0cd528b`.
+Docs for SCORPIOX CODE @ `655c38f`.
 
 > **The whole idea in one line:** set `PROVIDER=anthropic`, hand over an API key, and SCORPIOX CODE sends ordinary Anthropic Messages API requests — to `api.anthropic.com` by default, or to whatever URL you name.
 
@@ -41,22 +41,52 @@ All keys can live in any cascade tier of `scorpiox-env.txt`, in a named profile,
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `PROVIDER` | choice | *(unset)* | Set to `anthropic` to activate this provider. |
-| `ANTHROPIC_AUTH_PROVIDER` | choice | `official` | `official`, `custom`, `zai`, or `antigravity`. Selects which key and URL are used (see [Auth provider modes](#auth-provider-modes)). An unrecognized value falls back to `official`. |
+| `ANTHROPIC_AUTH_PROVIDER` | choice | `official` | `official`, `custom`, `zai`, or `antigravity`. Selects which key and URL are used (see [Auth provider modes](#auth-provider-modes)). |
 | `ANTHROPIC_API_KEY` | text | *(empty)* | The key for `official` and `custom` modes, and the **fallback key** in `zai` and `antigravity` modes when their dedicated key is empty. Also read from the OS environment variable of the same name, which beats every file in the cascade. **Required** unless a proxy key is set. |
 | `ANTHROPIC_API_URL` | text | `https://api.anthropic.com/v1/messages` | The **full** Messages endpoint, path included. Used in `custom` mode. |
 | `ANTHROPIC_ZAI_KEY` | text | *(empty)* | Key for `zai` mode. Falls back to `ANTHROPIC_API_KEY` when empty. |
 | `ANTHROPIC_ZAI_URL` | text | `https://api.z.ai/api/anthropic/v1/messages` | Endpoint for `zai` mode. |
 | `ANTHROPIC_ANTIGRAVITY_KEY` | text | *(empty)* | Key for `antigravity` mode. Falls back to `ANTHROPIC_API_KEY` when empty. |
 | `ANTHROPIC_ANTIGRAVITY_URL` | text | *(none)* | Endpoint for `antigravity` mode. **No default** — you must set it or the mode refuses to start. |
-| `MODEL` | text | `sonnet` | The model to run: a short alias (`opus`, `sonnet`, `haiku`) or a full model ID. See [Choosing a model](#choosing-a-model). |
+| `MODEL` | choice | `sonnet` | The model to run: a short alias (`opus`, `sonnet`, `haiku`) or a full model ID. See [Choosing a model](#choosing-a-model). |
 | `CLAUDE_MODEL_OPUS_ID_OVERRIDE` / `CLAUDE_MODEL_SONNET_ID_OVERRIDE` / `CLAUDE_MODEL_HAIKU_ID_OVERRIDE` | text | *(empty)* | Pin a specific model version to an alias. See [Model overrides](#model-overrides). |
 | `STREAMING` | bool | `0` | `0` = one complete response per turn, `1` = stream server-sent events. |
-| `THINKING` / `THINKING_BUDGET` | bool / number | `1` / `10000` | Extended-thinking toggle and its token budget. |
+| `THINKING` / `THINKING_BUDGET` | bool / text | `1` / `10000` | Extended-thinking toggle and its token budget. |
 | `USAGE_SPEED_ESTIMATE` | bool | `0` | Opt-in client-side speed estimate in the status bar. See [Streaming and speed estimates](#streaming-and-speed-estimates). |
 
-> **No login step.** Unlike the Claude Code and Grok providers there is no `scorpiox-*-login` helper here. There is nothing to sign in to — you supply a key, or you point at a proxy that handles the billing. Configuration is a handful of keys, not a login.
+---
 
-In the config editor (`/config` in a session, or `scorpiox-config` from a shell) these keys live in the **Provider & Authentication** section and appear once `PROVIDER` is set to `anthropic`. `ANTHROPIC_API_URL` only shows up when `ANTHROPIC_AUTH_PROVIDER` is `custom`.
+## Guided setup: the `scorpiox-anthropic-login` wizard
+
+Instead of hand-editing a profile file, you can run a guided wizard that asks for the pieces, validates them, and writes a ready-to-use named profile:
+
+```bash
+scorpiox-anthropic-login
+```
+
+The wizard walks through exactly the configuration on this page, in order:
+
+1. **Auth variant** — pick `official`, `custom`, `zai`, or `antigravity`.
+2. **Messages URL** — required for `custom` and `antigravity`; the rest use their built-in defaults.
+3. **API key** — entered masked; written with `0600` permissions.
+4. **Model** — fetched live from `{origin}/v1/models` where the endpoint supports it, so you can pick by number or type an exact ID; otherwise typed, defaulting to `sonnet`.
+5. **Live test** — one tiny `/v1/messages` completion through the final configuration (it costs tokens, so it always asks first and skips by default).
+6. **Write the profile** and print the switch hint.
+
+By default the profile is named `anthropic` and lands at `~/.claude/scorpiox-env/anthropic.txt`. Change the name with `--name <profile>` (it writes `<profile>.txt`). Switch to it in a session with `/profile <name>` — or set `ACTIVE_PROFILE=<name>`.
+
+| Invocation | What it does |
+|------------|--------------|
+| `scorpiox-anthropic-login` | Interactive wizard (profile `anthropic`) |
+| `scorpiox-anthropic-login --name <p>` | Same wizard, writes profile `<p>.txt` |
+| `scorpiox-anthropic-login --status` | Profile state as JSON (no tokens) — for machine mode |
+| `scorpiox-anthropic-login --start` | Machine mode: emits the form schema as JSON |
+| `scorpiox-anthropic-login --finish -` | Machine mode: reads the answers as one JSON object on stdin, validates, writes the profile |
+| `scorpiox-anthropic-login --cancel` | Machine mode: no pending state to clean up |
+| `--force` | Overwrite an existing profile instead of refusing |
+| `--help` / `--version` | Usage / version |
+
+> **Wizard, not a login.** There is nothing to sign in to — the Anthropic provider authenticates with a key, not an OAuth session. The wizard just replaces hand-editing with validation: it checks that a URL is present where one is required, that the key is non-empty, and that the model is a real ID. (The *account* OAuth flow is `scorpiox-claudecode-login` under `PROVIDER=claude_code` — a different tool entirely.)
 
 ---
 
@@ -66,8 +96,8 @@ In the config editor (`/config` in a session, or `scorpiox-config` from a shell)
 
 | Mode | Key used | Endpoint used | Model behavior |
 |------|----------|---------------|----------------|
-| `official` (default) | `ANTHROPIC_API_KEY` | The built-in Anthropic Messages URL (`https://api.anthropic.com/v1/messages`) | Aliases resolve to the current Claude IDs |
-| `custom` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_URL` — your endpoint, your rules | Aliases resolve to the current Claude IDs |
+| `official` (default) | `ANTHROPIC_API_KEY` | The built-in Anthropic Messages URL (`https://api.anthropic.com/v1/messages`) | Aliases resolve to the compiled Claude IDs |
+| `custom` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_URL` — your endpoint, your rules | Aliases resolve to the compiled Claude IDs |
 | `zai` | `ANTHROPIC_ZAI_KEY`, falling back to `ANTHROPIC_API_KEY` | `ANTHROPIC_ZAI_URL`, defaulting to `https://api.z.ai/api/anthropic/v1/messages` | **Every request is rewritten to `glm-5`** |
 | `antigravity` | `ANTHROPIC_ANTIGRAVITY_KEY`, falling back to `ANTHROPIC_API_KEY` | `ANTHROPIC_ANTIGRAVITY_URL` (**must be set**) | Aliases map to `*thinking` variants |
 
@@ -86,7 +116,7 @@ The endpoint is Anthropic's Messages API. Each request carries `content-type: ap
 
 ### `custom` — your own endpoint
 
-Point at any Anthropic-compatible URL:
+Same key shape, but you decide the URL. This is the mode for a self-hosted Anthropic-compatible gateway: a load-balancing front, a corporate relay, a recording test double, or a multi-tenant router that expects one path per tenant.
 
 ```
 PROVIDER=anthropic
@@ -96,11 +126,12 @@ ANTHROPIC_API_URL=https://llm-gateway.internal.example.com/v1/messages
 MODEL=sonnet
 ```
 
-Three things to get right:
+Two things to get right:
 
 - **The URL is the full endpoint, path included.** SCORPIOX CODE sends it as-is and appends nothing. `https://llm-gateway.internal.example.com/v1/messages` is correct; `https://llm-gateway.internal.example.com` is not.
 - **The key is whatever your endpoint expects.** It still goes out as `x-api-key`, so a gateway that checks a different header needs to be the thing that translates.
-- **Any server that accepts Anthropic Messages JSON works.** The request body is standard: `model`, `max_tokens`, `stream`, an optional `thinking` block, a `system` array, `messages`, and `tools` when tools are on.
+
+Whatever the endpoint is, the request body is standard Anthropic Messages JSON: `model`, `max_tokens`, `stream`, an optional `thinking` block, a `system` array, `messages`, and `tools` when tools are on. Any server that accepts that shape works.
 
 ### `zai` — the Z.AI proxy
 
@@ -133,7 +164,7 @@ If the Antigravity URL is empty the provider stops and reports that it is not co
 
 ## Choosing a model
 
-`MODEL` accepts either a short alias or a full model ID. In `official` and `custom` modes the aliases resolve to these IDs at this commit:
+`MODEL` accepts either a short alias or a full model ID. In `official` and `custom` modes the aliases resolve to these compiled-in IDs at this commit:
 
 | `MODEL` value | Resolves to |
 |---------------|-------------|
@@ -143,7 +174,7 @@ If the Antigravity URL is empty the provider stops and reports that it is not co
 | `haiku` | `claude-haiku-4-5-20251001` |
 | any other value | passed through as-is |
 
-Anything that is not one of the three aliases — for example `claude-opus-4-6` or a newer ID your account has access to — is sent to the endpoint unchanged. That is how you run a model version the built-in defaults do not know about without editing anything.
+Anything that is not one of the three aliases — for example `claude-opus-4-6` or a newer ID your account has access to — is sent to the endpoint unchanged. That is how you run a model version the compiled defaults do not know about without editing anything.
 
 ### Model overrides
 
@@ -153,7 +184,7 @@ Pin a specific version to each alias with the override keys:
 - `CLAUDE_MODEL_SONNET_ID_OVERRIDE`
 - `CLAUDE_MODEL_HAIKU_ID_OVERRIDE`
 
-When set, an override replaces the built-in ID for that alias — so `MODEL=opus` resolves to your pinned version instead of the default one. Full model IDs written directly in `MODEL` are never overridden; they pass through as-is. Leave an override empty to keep the built-in default.
+When set, an override replaces the compiled-in ID for that alias — so `MODEL=opus` resolves to your pinned version instead of the built-in one. Full model IDs written directly in `MODEL` are never overridden; they pass through as-is. Leave an override empty to keep the compiled default.
 
 ### Model behavior by mode
 
@@ -165,23 +196,7 @@ The alias-to-ID mapping depends on the auth provider:
 | `antigravity` | `claude-opus-4-5-thinking` | `claude-sonnet-4-5-thinking` | `claude-sonnet-4-5-thinking` | passed through |
 | `zai` | `glm-5` | `glm-5` | `glm-5` | `glm-5` (every request) |
 
-Switch models at runtime without editing any file with the in-session `/model` command, or set a standing default in your profile. `/model` takes the same values as `MODEL` — aliases and full IDs both work, and the switch lasts for the current session; put `MODEL` in a profile or config file to make it stick. You can also pin a model for a single run with `sx -m opus`, or override any key for that run only with `sx -e ANTHROPIC_AUTH_PROVIDER=zai`.
-
----
-
-## What a request looks like
-
-For each turn SCORPIOX CODE builds one Messages API request:
-
-1. **Model** — the resolved ID from [Choosing a model](#choosing-a-model).
-2. **System prompt** — sent as two text blocks, each marked as ephemeral cache control so the provider can reuse the prefix between turns.
-3. **Messages** — the conversation, with consecutive same-role entries grouped, and a cache breakpoint on the last block of each role.
-4. **Thinking** — an extended-thinking block with `THINKING_BUDGET` tokens when `THINKING=1`.
-5. **Tools** — the tool definitions when `TOOLS=1`, with the same cache treatment on the first turn.
-
-Each request is sent with a ten-minute timeout, so long agentic turns are not cut off mid-flight. The response comes back as content blocks with a stop reason and a usage object. Token counts are shown in the session status: input, output, and the cache read and cache write figures — exactly what you need to check what a turn actually cost. See [Token Usage Observability](usage-observability.md) for where those numbers appear and what feeds them.
-
-Note that the subscription-rate indicators (`5h:` / `7d:` in the status bar) come from the subscription providers' response headers. The Anthropic provider sends plain API requests, so those indicators stay empty here; your cost signal is the token count itself.
+Switch models at runtime without editing any file with the in-session `/model` command, or set a standing default in your profile. `/model` takes the same values as `MODEL`.
 
 ---
 
@@ -196,7 +211,7 @@ STREAMING=1
 USAGE_SPEED_ESTIMATE=1
 ```
 
-With both on, SCORPIOX CODE times each request locally and shows prompt and generation rates (`~pp` / `~tg`) even when the endpoint reports no timings of its own; when no first-token timestamp can be picked out of the stream you get a single end-to-end figure (`~e2e`) instead. Estimates include network latency, and any timings the server does report always win.
+With both set, SCORPIOX CODE times the first token arriving and reports prompt and generation throughput (`~pp` and `~tg`) based on the tokens the endpoint reports. Where a provider publishes no timings — which is typical of hosted APIs and custom gateways — this is the only source of those numbers. Without `STREAMING=1` you get an end-to-end figure instead. Server-reported timings, when an endpoint does supply them, always win and are never overwritten. The estimate is skipped for any request that had to be retried, so a backoff-and-retry sequence never pollutes the measurement.
 
 ---
 
@@ -217,11 +232,17 @@ Anything else is reported immediately as an error with the status and the respon
 
 ---
 
-## Where every request is recorded
+## What a request looks like
 
-Every request and response is written verbatim to disk: the full endpoint URL, all headers (your key masked), the complete request body, and the response payload with its status code. When session logging is active the capture lands in that session's `traffic/` folder; otherwise it goes to a timestamped folder under `.scorpiox/traffics/providers/anthropic/`. A request that fails internal validation before it is sent is saved too, marked invalid, so nothing disappears silently.
+For each turn SCORPIOX CODE builds one Messages API request:
 
-This is the same zero-black-box stance as the rest of SCORPIOX CODE — see [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md) for the file layout and how to replay a captured call.
+1. **Model** — the resolved ID from [Choosing a model](#choosing-a-model).
+2. **System prompt** — sent as two text blocks, each marked as ephemeral cache control so the provider can reuse the prefix between turns.
+3. **Messages** — the conversation, with consecutive same-role entries grouped, and a cache breakpoint on the last block of each role.
+4. **Thinking** — an extended-thinking block with `THINKING_BUDGET` when thinking is on.
+5. **Tools** — the tool definitions when `TOOLS=1`, with the same cache treatment on the first turn.
+
+The response comes back as content blocks with a stop reason and a usage object. Token counts are shown in the session status: input, output, and the cache read and cache write figures, which is exactly what you need to check what a turn actually cost.
 
 ---
 
@@ -232,14 +253,14 @@ It is easy to confuse the three because they all run Claude models. Here is the 
 | | **Anthropic provider** (this page) | **Claude Code provider** | **Google Cloud Claude provider** |
 |---|---|---|---|
 | `PROVIDER` value | `anthropic` | `claude_code` | `google_claude` |
-| **Authentication** | `ANTHROPIC_API_KEY` sent as `x-api-key` | OAuth session login (`scorpiox-claudecode-login`) | Google account OAuth via Google's Claude backend |
-| **Billing** | Pay-per-token API usage on your key | Your Claude / Claude Code subscription allowance | Your Google AI subscription allowance |
+| **Authentication** | `ANTHROPIC_API_KEY` sent as `x-api-key` | OAuth session login (`scorpiox-claudecode-login`) | Google Cloud Claude session |
+| **Billing** | Pay-per-token API usage on your key | Your Claude / Claude Code subscription allowance | Your Google Cloud plan |
 | **Endpoint** | `ANTHROPIC_API_URL` (default `api.anthropic.com/v1/messages`) | `api.anthropic.com/v1/messages?beta=true` (or the SCORPIOX proxy) | Google's Claude endpoint |
 | **Model key** | `MODEL` | `MODEL` | `GOOGLE_CLAUDE_MODEL` |
 | **Redirectable to your own URL** | Yes — `custom` mode, plus `zai` and `antigravity` proxy modes | No — the Claude Code surface only | No |
-| **Wire format** | Plain Messages API, no CLI-emulating headers, no beta flags | Full Claude Code CLI emulation (user-agent, `x-stainless-*`, beta flags) | Translated to Google's request shape |
+| **Best for** | Pay-as-you-go API access and custom endpoints | People who already pay for Claude / Claude Code | People on a Google Cloud Claude plan |
 
-Rule of thumb: **API key or custom endpoint, use `anthropic`. A Claude / Claude Code seat, use `claude_code`. A Google AI plan for Claude models, use `google_claude`.**
+Rule of thumb: **API key or custom endpoint, use `anthropic`. A Claude / Claude Code seat, use `claude_code`. A Google Cloud Claude plan, use `google_claude`.**
 
 The Anthropic and Claude Code providers both reach Anthropic's Messages API, but with different credentials, different headers, and different billing. Only the Anthropic provider can be pointed at a non-Anthropic URL.
 
@@ -247,15 +268,15 @@ The Anthropic and Claude Code providers both reach Anthropic's Messages API, but
 
 ## Gotchas
 
-- **`ANTHROPIC_API_URL` is a full endpoint, not an origin.** It includes the path — the reference value is `https://api.anthropic.com/v1/messages`. This is the opposite convention from the OpenAI provider's `OPENAI_BASE_URL`, which is an origin with no path. A missing `/v1/messages` is the most common custom-endpoint failure. See [Using the OpenAI Provider](openai-provider.md).
-- **`ANTHROPIC_API_URL` only applies in `custom` mode.** Setting it while `ANTHROPIC_AUTH_PROVIDER` is `official` does nothing — official mode always uses the built-in Anthropic URL. Switch the mode to `custom` for your URL to be honored.
+- **`ANTHROPIC_API_URL` is a full endpoint, not an origin.** It includes the path — the reference value is `https://api.anthropic.com/v1/messages`. This is the opposite convention from the OpenAI provider's `OPENAI_BASE_URL`, which is an origin with no path. A missing `/v1/messages` is the most common custom-endpoint failure.
 - **`antigravity` has no default URL.** You must set `ANTHROPIC_ANTIGRAVITY_URL`. If it is empty the provider reports the URL as unconfigured instead of guessing.
+- **Proxy keys fall back to `ANTHROPIC_API_KEY`.** In `zai` and `antigravity` modes, an empty dedicated key (`ANTHROPIC_ZAI_KEY` / `ANTHROPIC_ANTIGRAVITY_KEY`) makes the provider use `ANTHROPIC_API_KEY`. Set the dedicated key deliberately — a silent fallback is easy to miss.
+- **`zai` rewrites every model to `glm-5`.** The alias you set in `MODEL` is intent-only; the on-the-wire ID is always `glm-5` in that mode.
 - **`antigravity` aliases map to `*thinking` variants.** `sonnet` and `haiku` both become `claude-sonnet-4-5-thinking`; only `opus` becomes `claude-opus-4-5-thinking`.
 - **`MODEL` defaults to `sonnet`.** Leave it unset and requests ask for `claude-sonnet-4-6`. Set it to a model the endpoint actually serves, or pass a full model ID.
-- **The config editor offers three models.** `MODEL` is a three-way choice (`opus` / `sonnet` / `haiku`) in the editor UI. Full model IDs still work — set them in a config file, a profile, or pass them to `/model` or `sx -m` instead.
-- **The OS environment variable wins.** An `ANTHROPIC_API_KEY` exported in your shell beats any value in a file — useful for one-off runs, easy to forget an hour later. The same holds for every other key in this table.
-- **No `5h:` / `7d:` indicators here.** Those come from subscription providers' rate-limit headers; this provider sends plain API requests, so the status bar shows token counts only.
-- **Traffic is logged locally.** Requests and responses are written under the session's `traffic/` directory (or a timestamped folder under `.scorpiox/traffics/providers/anthropic/`) for inspection. See [Traffic Logging](traffic-logging.md).
+- **The OS environment variable wins.** An `ANTHROPIC_API_KEY` exported in your shell beats any value in a file — useful for one-off runs, easy to forget an hour later.
+- **The wizard's live test costs tokens.** It runs one real completion, so it always asks first and skips by default. The profile is written even if the test fails — fix and re-run if needed.
+- **Traffic is logged locally.** Requests and responses are written under the session's `traffic/` directory for inspection. See [Traffic Logging](traffic-logging.md).
 
 ---
 
@@ -263,6 +284,7 @@ The Anthropic and Claude Code providers both reach Anthropic's Messages API, but
 
 | Goal | What to set |
 |------|-------------|
+| Guided setup | `scorpiox-anthropic-login` (or `--name <profile>`) |
 | Official Anthropic API | `PROVIDER=anthropic` + `ANTHROPIC_API_KEY` |
 | Custom endpoint | `+ ANTHROPIC_AUTH_PROVIDER=custom` + `ANTHROPIC_API_URL` |
 | Z.AI proxy | `+ ANTHROPIC_AUTH_PROVIDER=zai` + `ANTHROPIC_ZAI_KEY` |
@@ -270,8 +292,8 @@ The Anthropic and Claude Code providers both reach Anthropic's Messages API, but
 | Pick a model | `MODEL=sonnet` (or `opus` / `haiku` / a full ID) |
 | Pin a version | `CLAUDE_MODEL_*_ID_OVERRIDE` |
 | Switch mid-session | `/model <name>` |
+| Switch profiles | `/profile <name>` (or `ACTIVE_PROFILE=<name>`) |
 | Status-bar speed figures | `STREAMING=1` + `USAGE_SPEED_ESTIMATE=1` |
-| One-off run override | `sx -e ANTHROPIC_API_KEY=... -p "..."` |
 
 Pick your mode, set the key (and the URL where there is no default), choose a model, and go.
 
@@ -279,8 +301,6 @@ Pick your mode, set the key (and the URL where there is no default), choose a mo
 
 ## See also
 
-- [Configuration and Profiles](scorpiox-env.md) — the cascade every key above is read through, and `/profile` vs `/use`.
-- [Using Claude Code CLI Subscription in SCORPIOX CODE](claude-code-provider.md) — the subscription path to the same models.
-- [Token Usage Observability](usage-observability.md) — where the token counts and speed figures show up.
-- [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md) — the verbatim on-disk record of every request.
-- [Using the OpenAI Provider](openai-provider.md) — the other key-addressable provider, and its opposite URL convention.
+- [Configuration and Profiles](scorpiox-env.md)
+- [Using Claude Code CLI Subscription in SCORPIOX CODE](claude-code-provider.md)
+- [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md)
