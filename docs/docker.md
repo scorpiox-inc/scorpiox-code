@@ -1,12 +1,12 @@
 # Run SCORPIOX BOT in Docker
 
-You have a machine that should host a **SCORPIOX BOT** node — a spare laptop, a VPS, a homelab box, a CI worker — and you want it online on the SCORPIOX BOT web with as little on that machine as possible. **Docker** gives you exactly that: one official image, one run command, and a node that survives reboots, upgrades, and restarts.
+You have a machine that should host a **SCORPIOX BOT** node — a spare laptop, a VPS, a homelab box, a CI worker — and you want it online in the SCORPIOX BOT web with as little on that machine as possible. **Docker** gives you exactly that: one official image, one run command, and a node that survives reboots, upgrades, and restarts.
 
-Everything this page needs is two named volumes and a single `docker run`. The image does the onboarding for you — login, node name, node password, starter workspace — the first time you start it, and quietly reconnects on every start after that.
+Everything this page needs is two named volumes and a single `docker run`. The image does the onboarding for you — starter workspace, login, node name, node password — the first time you start it, and quietly reconnects on every start after that.
 
-Docs for SCORPIOX CODE @ `ade108f`.
+Docs for SCORPIOX CODE @ `655c38f`.
 
-> **The whole idea in one line:** `docker run` a `scorpioxinc/bot` image with a data volume and a codebases volume, answer three prompts the first time, and your machine shows up in the SCORPIOX BOT web as a node you can drive from anywhere.
+> **The whole idea in one line:** `docker run` a `scorpioxinc/bot` image with a data volume and a codebases volume, answer the prompts the first time, and your machine shows up in the SCORPIOX BOT web as a node you can drive from anywhere.
 
 ---
 
@@ -26,15 +26,19 @@ Docker itself is out of scope for this page — no daemons to babysit, no VMs to
 
 ## Which image, and which tag
 
-The official image is **`scorpioxinc/bot`** on Docker Hub. It bundles `scorpiox-bot` (the node supervisor) plus a minimal Linux base with `git`, `curl`, and CA certificates — enough for the node and its onboarding.
+The official image is **`scorpioxinc/bot`** on Docker Hub. It bundles the SCORPIOX CODE core suite (`scorpiox`, `scorpiox-bot`, and the bot API and web pieces) plus a minimal Linux base with `bash`, `git`, `curl`, CA certificates, time zones, and process tools — enough for the node, its onboarding, and the agent workspaces it hosts.
 
 | Tag | What it is | Use it for |
 |-----|------------|------------|
-| `edge` | Newest build on a temporary glibc base (Debian). **This is the working image today.** | Production and day-to-day running |
-| `<date-version>`, e.g. `2026-10-13-0754` | Pinned release, dated | Rollback and reproducibility |
-| `latest` | Newest release — **currently a preview** (Alpine base) | Preview only; it is being blocked by a glibc dependency until static musl bot builds land |
+| `latest` | Alpine (musl) image. Every binary in it is static or verified to load at build time — the build fails if any executable would not run. **This is the working image today; use this tag.** | Production and day-to-day running |
+| `edge` | Newest untested build on a temporary Debian (glibc) base. It works, and is kept as a fallback. | Fallback only |
+| `<scorpiox version>`, e.g. `2026-10-13-0754` | Pinned release, dated | Rollback and reproducibility |
+| `arch`, `agentcore`, `desktop` | Placeholder images, not the bot node | Nothing yet |
 
-The tags change as releases land — `latest` will become the working tag when the Alpine image is unblocked. Until then, use `edge`.
+Two honest caveats about `latest` today:
+
+- **It is x86_64-only for now.** The arm64 build is blocked until the bot API and web pieces publish arm64 builds — until then, run the image on x86_64 hardware (or an x86_64 emulation layer).
+- The in-container `/help` topic lookup is not available in this image (its binary has no Linux build for the musl base); everything else works.
 
 ---
 
@@ -44,14 +48,14 @@ The tags change as releases land — `latest` will become the working tag when t
 docker run -it --restart unless-stopped \
   -v scorpiox-data:/root \
   -v scorpiox-code:/codebases \
-  scorpioxinc/bot:edge
+  scorpioxinc/bot:latest
 ```
 
 Every flag does exactly one job:
 
 | Flag | What it does |
 |------|--------------|
-| `-it` | Interactive terminal. Required for the first run, because you type your account credentials and node password at prompts. |
+| `-it` | Interactive terminal. Required for the first run, because you answer the onboarding prompts — login and node password are typed, not passed as variables. |
 | `--restart unless-stopped` | If the container or the host reboots, Docker brings the node back up on its own. |
 | `-v scorpiox-data:/root` | Named volume for **everything the node owns**: your login credentials, the node identity and password, onboarding state, and logs. This is what makes the node persistent. |
 | `-v scorpiox-code:/codebases` | Named volume for your **project folders** — the code the agents inside the node will work on. |
@@ -60,7 +64,7 @@ Every flag does exactly one job:
 
 | Folder | Mount | Holds |
 |--------|-------|-------|
-| `/root` (the data volume) | `scorpiox-data` | `~/.scorpiox/` — login token, node settings (`bot-node.env`), onboarding state, logs. `~/.claude/scorpiox-env.txt` — the node's internal session settings, written by the image at first start. |
+| `/root` (the data volume) | `scorpiox-data` | `~/.scorpiox/` — login token (`auth.json`), node settings (`bot-node.env`), onboarding state (`onboard.state`), logs. `~/.claude/scorpiox-env.txt` — the node's internal session settings, written by the image at first start. |
 | `/codebases` (the code volume) | `scorpiox-code` | Your projects. The image's working directory is `/codebases`, and each subfolder is one project a session can work on. |
 
 ### Mounting a folder you already have
@@ -71,20 +75,20 @@ Named volumes are the simplest option, but if your projects already live in a di
 docker run -it --restart unless-stopped \
   -v scorpiox-data:/root \
   -v /home/<you>/projects:/codebases \
-  scorpioxinc/bot:edge
+  scorpioxinc/bot:latest
 ```
 
 Now `/codebases` inside the container is literally your `~/projects` folder — same files, both sides, no copying.
 
 ### Why no `-p` port publishing
 
-The node talks to the mesh hub over a reverse tunnel — it dials out, nothing dials in. There is no port to publish and no firewall hole to make.
+The node joins the mesh hub over a reverse tunnel — it dials out, nothing dials in. There is no port to publish and no firewall hole to make.
 
 ---
 
 ## First run: the onboarding walkthrough
 
-The first time you start the container, the image walks you through onboarding in order. Each step is skipped automatically the moment its state file exists, so you only ever answer these once.
+The first time you start the container, the image walks you through onboarding in order. Every step is skipped automatically the moment its state file exists in the data volume, so you only ever answer these once.
 
 ### 1. Starter workspace prompt
 
@@ -97,11 +101,11 @@ The image looks at `/codebases` first:
 
 A *starter workspace* is a small, git-initialized folder `bot-demo` under `/codebases` with an `AGENTS.md` that tells the agents who they are. It is a safe default for a brand-new node: a place to poke at, without touching your real projects.
 
-Your answer is remembered in the data volume, so it is asked **only once** — never again on restart, upgrade, or re-image. To change your mind later, delete the `demo=` line from the onboarding state file inside the data volume and re-run.
+Your answer is remembered in the data volume, so it is asked **only once** — never again on restart, upgrade, or re-image. To change your mind later, delete the `demo=` line from `~/.scorpiox/onboard.state` inside the data volume and re-run.
 
 ### 2. Login to your Scorpio+ account
 
-If the node is not logged in yet, you are prompted for your account email and password (typed, not echoed). The credentials are stored in the **data volume** — `~/.scorpiox/auth.json` inside the container — so a restart, an upgrade, or even a fresh image never asks you to log in again.
+If the node is not logged in yet, you are prompted for your account email, then your password (echo off). The credentials are stored in the **data volume** — `~/.scorpiox/auth.json` inside the container — so a restart, an upgrade, or even a fresh image never asks you to log in again.
 
 > **Heads-up for non-interactive runs:** if stdin is not a terminal (CI, scripts, `docker exec` without `-it`), the image cannot prompt you. If it finds you are not logged in, it stops and tells you to re-run once with `-it`. So: do your first run interactively.
 
@@ -113,9 +117,9 @@ Then you are prompted twice for a **node password**, echo off. This is the passw
 
 ### 4. Connect and stay foreground
 
-The image ends by connecting the node to the mesh hub and staying in the foreground. You should see the connection confirm, and your machine appear in the SCORPIOX BOT web as a node. `Ctrl+C` stops the container.
+The image ends by connecting the node to the mesh hub and staying in the foreground. Your machine appears in the SCORPIOX BOT web as a node. `Ctrl+C` stops the container.
 
-> **What you do next is remote, not local.** Once the node is online, you drive it from the SCORPIOX BOT web — sessions, prompts, live terminal, fleet view. See [Remote Agent Control & Fleet Management with SCORPIOX BOT](scorpiox-bot.md). Sessions themselves are managed with [scorpiox-tmux](scorpiox-tmux.md).
+> **What you do next is remote, not local.** Once the node is online, you drive it from the SCORPIOX BOT web — sessions, prompts, live terminal, fleet view. See [Remote Agent Control & Fleet Management with SCORPIOX BOT](scorpiox-bot.md). Sessions themselves are managed with [Managing Agent Sessions with scorpiox-tmux](scorpiox-tmux.md).
 
 ---
 
@@ -125,10 +129,10 @@ The `--restart unless-stopped` flag is what turns the first interactive run into
 
 | You want to | Do this |
 |-------------|---------|
-| Stop the node (and keep it stopped) | `docker stop <container>` — restart policy respects this; it will not come back on its own. |
+| Stop the node (and keep it stopped) | `docker stop <container>` — the restart policy respects this; it will not come back on its own. |
 | Start it again | `docker start <container>` — login and node state are in the data volume; no prompts. |
 | Watch it live | `docker logs -f <container>` |
-| Re-run the onboarding (e.g. new account) | Remove the data volume: `docker volume rm scorpiox-data` — everything onboarding-related is re-prompted on the next start. |
+| Re-run the onboarding (e.g. a new account) | Remove the data volume: `docker volume rm scorpiox-data` — everything onboarding-related is re-prompted on the next start. |
 
 The container's lifecycle is entirely Docker's: no systemd unit, no `tmux` pane to keep alive, no login on the host to maintain.
 
@@ -140,7 +144,7 @@ The node's state is in the **volumes**, not in the image — so an upgrade is: p
 
 ```bash
 # 1. Pull the new image
-docker pull scorpioxinc/bot:edge
+docker pull scorpioxinc/bot:latest
 
 # 2. Stop and remove the old container (volumes are not touched)
 docker stop <container>
@@ -150,12 +154,12 @@ docker rm <container>
 docker run -it --restart unless-stopped \
   -v scorpiox-data:/root \
   -v scorpiox-code:/codebases \
-  scorpioxinc/bot:edge
+  scorpioxinc/bot:latest
 ```
 
 No onboarding prompts — the state files are all already there in the data volume. The new image just connects the same node.
 
-If you want a pinned tag for rollback (e.g. `2026-10-13-0754`), run the same three steps with that tag instead of `edge`.
+If you want a pinned tag for rollback (e.g. `2026-10-13-0754`), run the same three steps with that tag instead of `latest`.
 
 ---
 
@@ -167,7 +171,7 @@ Everything you care about is in the two named volumes. Nothing important lives i
 |------|-------------------------|--------|
 | Login token (`auth.json`) | `~/.scorpiox/` | `scorpiox-data` |
 | Node name and node password (`bot-node.env`) | `~/.scorpiox/` | `scorpiox-data` |
-| Onboarding state (starter workspace answer) | `~/.scorpiox/` | `scorpiox-data` |
+| Onboarding state (starter workspace answer, `onboard.state`) | `~/.scorpiox/` | `scorpiox-data` |
 | Node logs | `~/.scorpiox/logs/` | `scorpiox-data` |
 | Node session settings (`scorpiox-env.txt`) | `~/.claude/` | `scorpiox-data` |
 | Your projects | `/codebases/` | `scorpiox-code` |
@@ -179,7 +183,7 @@ Inspect the data volume on the host with `docker volume inspect scorpiox-data`, 
 
 ## Knobs the image honours
 
-Secrets (login, node password) are always typed at prompts — never passed as environment variables. A handful of *non-secret* settings are read from the environment if you want to set them up front:
+Secrets (login, node password) are always typed at prompts — never passed as environment variables, never as arguments. A handful of *non-secret* settings are read from the environment if you want to set them up front:
 
 | Variable | Effect |
 |----------|--------|
@@ -187,18 +191,20 @@ Secrets (login, node password) are always typed at prompts — never passed as e
 | `SCORPIOX_CREATE_DEMO` | `yes` or `no` — answers the starter workspace prompt non-interactively. Useful in CI. |
 | `SCORPIOX_WORKSPACE` | Starter workspace folder name under `/codebases`. Default: `bot-demo`. |
 
+Passing a command to the image (`docker run scorpioxinc/bot:latest <command>`) runs that command inside the image instead of onboarding — this is what `scorpiox-unshare <image> <command>` uses to give an agent a disposable shell inside the same image. A bare login shell (`bash -l` or `bash -i`) is treated as interactive and still onboards.
+
 ---
 
 ## A minimal day-to-day recipe
 
 ```bash
 # First time, on the machine that will host the node
-docker pull scorpioxinc/bot:edge
+docker pull scorpioxinc/bot:latest
 docker run -it --restart unless-stopped \
   -v scorpiox-data:/root \
   -v scorpiox-code:/codebases \
-  scorpioxinc/bot:edge
-# ... answer login, node name, node password, and the starter workspace prompt ...
+  scorpioxinc/bot:latest
+# ... answer the starter workspace prompt, log in, set the node name and node password ...
 # ... open the SCORPIOX BOT web, find your node, drive it ...
 
 # Any later day, after a reboot or an upgrade

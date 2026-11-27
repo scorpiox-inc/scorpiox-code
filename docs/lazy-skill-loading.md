@@ -1,10 +1,10 @@
 # Lazy Skill Loading
 
-SCORPIOX CODE ships two shapes for the same skill surface. In the default shape the agent sees a **catalog**: every available skill's name and one-line description is baked into the `InvokeSkill` tool description on every request, and the body loads only when a skill is invoked. In the lazy shape the catalog is dropped — the agent sees a short pointer telling it to *search* for skills instead, and discovery happens through a second tool, **`SearchSkills`**, on demand.
+SCORPIOX CODE ships two shapes for the same skill surface. In the default shape the agent sees a **catalog**: every available skill's name and one-line description are baked into the `InvokeSkill` tool description on every request, and the skill body loads only when a skill is actually invoked. In the lazy shape the catalog is dropped — the agent sees a short pointer telling it to *search* for skills instead, and discovery happens through a second tool, **`SearchSkills`**, on demand.
 
 The whole switch is one config key: **`TOOL_SEARCHSKILLS`**.
 
-Docs for SCORPIOX CODE @ `e30b171`.
+Docs for SCORPIOX CODE @ `655c38f`.
 
 > **The whole idea in one line:** set `TOOL_SEARCHSKILLS=1` and the standing skill list disappears from the prompt; the agent finds skills by grep when it needs them, at the cost of one extra tool call the first time it goes looking.
 
@@ -28,7 +28,7 @@ Skill folders (<name>/SKILL.md; project overrides user; built-ins have no file):
 
 One `- name: description` line per skill, in a deterministic order, followed by the skill folders so the agent knows where skills physically live. The cost is flat per skill and grows with your library: a description line is small, but 200 skills is 200 lines that ride along on every single request, cached or not.
 
-**Lazy mode (`TOOL_SEARCHSKILLS=1`)** — the catalog is replaced by a pointer. When there are no other listing rules in play and no built-in skills to show, the description becomes exactly:
+**Lazy mode (`TOOL_SEARCHSKILLS=1`)** — the catalog is replaced by a pointer. With no other listing rules in play and no built-in skills to show, the description becomes exactly:
 
 ```
 Invoke or load a skill by name. Returns the skill content for
@@ -38,7 +38,7 @@ to discover available skills by keyword.
 
 That is 167 bytes, and it is the whole description. The names and descriptions of your project, user, and additional skills leave the prompt.
 
-In practice built-in skills — the ones compiled into the binary — stay listed, so the agent keeps a floor of always-visible procedures (`create-skill`, `edit-skill`, `preferred-*`, and friends). When some skills are listed and others are not, the description carries the built-ins, then a hint naming how many are hidden, then the skill-folder paths:
+In practice built-in skills — the ones compiled into the binary — stay listed, so the agent keeps a floor of always-visible procedures. When some skills are listed and others are not, the description carries the built-ins, then a hint naming how many are hidden, then the skill-folder paths:
 
 ```
 ...one line per built-in skill...
@@ -48,7 +48,7 @@ Skill folders (<name>/SKILL.md; project overrides user; built-ins have no file):
 
 So even in lazy mode the agent knows a larger library exists behind the search, and where it lives, without any of it being enumerated.
 
-Everything stays invokable. `InvokeSkill deploy` works in lazy mode exactly as it does in catalog mode — the list controls only what is *advertised*, never what is *loadable*.
+Everything stays invokable. `InvokeSkill release-notes` works in lazy mode exactly as it does in catalog mode — the list controls only what is *advertised*, never what is *loadable*.
 
 ### When lazy mode saves tokens, and when it costs
 
@@ -108,14 +108,16 @@ One honesty note about defaults. The **Tools** section of the interactive config
 
 ## SearchSkills: the discovery tool
 
-`SearchSkills` is what makes lazy mode work. It is a real grep — the product's own zero-dependency `scorpiox-grep` binary, invoked with `-rl` (recursive, filenames only) — run across the skill directories: your user skills folder, the project skills folder, and every additional skills directory you have configured. Built-in skills have no file on disk, so they are matched in memory against their names, descriptions, and loaded content instead.
+`SearchSkills` is the tool that replaces the catalog. It takes two parameters:
 
 | Parameter | Required | What it does |
 |-----------|----------|--------------|
-| `pattern` | Yes | Text to match against skill file contents, names, and descriptions. **An empty string lists every skill.** |
-| `flags` | No | `-i` (case-insensitive, the default), `-E` (regex), `-w` (whole word). Examples: `-i -w`, `-E -i`. |
+| `pattern` | Yes | Grep search pattern matched against skill file content, names, and descriptions. Fixed strings by default, regex with `-E`. An empty string lists everything. |
+| `flags` | No | Optional flags passed to the grep: `-i` (case insensitive), `-E` (regex), `-w` (whole word). Example: `'-i -w'` or `'-E -i'`. Default: `-i`. |
 
-It is grep-backed, not model-backed: matches are literal text inside your skill files, so it finds the thing you actually wrote rather than guessing at what a skill might be about. That makes it a reliable index into your own prose — write your `SKILL.md` descriptions and bodies with the vocabulary a future task will use, and the search finds them.
+### What the search actually does
+
+A non-empty pattern shells out to the bundled grep binary in read-file-list mode: `scorpiox-grep -rl <flags> '<pattern>'`, run over the user skills folder, the project skills folder, and any additional skills folders, with a 15-second timeout. The grep reports matching file paths, and the tool turns each path into a skill name — the directory containing the file — deduplicates, and also sweeps the built-in skills in memory (they have no file on disk, so they are matched directly against name, description, and any loaded content).
 
 The result is a compact JSON list, one entry per matching skill:
 
@@ -158,53 +160,22 @@ Searches time out at 15 seconds, which is generous for a recursive grep over ski
 
 The two mechanisms meet in one place: **the moment the visible list is partial — some skills exist but are not advertised — `SearchSkills` is enabled.** The auto-enable is in-memory for the running session and is never written back to your config files, so a filter can turn the tool on for a session without permanently flipping the key. Required skills and built-in skills are exempt from filtering and always stay listed, so a filter can never hide the things a session is contractually obliged to load.
 
-**Filtering and lazy mode are alternatives, not ingredients.** If `SKILL_LIST_*` filters are active they shape the catalog, and `SearchSkills` auto-enables for the hidden remainder. Setting `TOOL_SEARCHSKILLS=1` on top collapses the catalog to the built-ins. Both roads end at the same place — search as the path to everything not listed — so pick one and let it do the work.
+**Required skills stay safe.** Lazy mode hides the catalog, but the required-skills contract is not a catalog concern — it is enforced by nudges that name each missing required skill explicitly at the end of a turn. Turn the catalog off and a required skill that was never advertised still gets demanded by name. You keep the token savings of lazy mode and the guarantee of the contract at the same time.
 
-**Required skills still work.** The required-skills cascade (`required_skills.txt` at user, project, and session level) is unchanged in lazy mode: a required skill that has not been loaded still triggers the end-of-turn nudge naming it, and force-inject still puts its body straight into context. If you go lazy, this is the mechanism that keeps must-use skills guaranteed — the catalog no longer advertises them, but the nudge still names them and tells the agent to load them. See [Skills in SCORPIOX CODE](skills-system.md) for the full contract.
-
-**Prompt-cache stability.** In catalog mode, adding or renaming a skill rewrites the `InvokeSkill` description and can invalidate the cached prompt prefix; the loader already minimizes that by rescanning only when a skill directory's mtime changes. Lazy mode removes most of that churn: the description shrinks to a static pointer plus a built-in index, so adding or editing your own skills leaves the tool JSON untouched.
-
-**Where the feature does not reach.** The browser/WASM build cannot run `SearchSkills` — the grep is a subprocess and the sandbox has no processes — so the tool is force-disabled there and lazy mode has nothing to fall back on. The catalog is the only discovery surface in the browser. And `/disable_skill` behaves the same in both modes: the skill stays advertised (so the list stays stable), and loading it returns an error for the rest of the session.
+**WASM builds.** `SearchSkills` shells out to a grep process, which a single-threaded browser build cannot do. In WASM the tool is disabled automatically — as is `InvokeSkill`, whose scripts also shell out — so browser sessions run without the skill tools rather than with half-broken ones.
 
 ---
 
-## Configuration reference
+## Summary
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `TOOL_SEARCHSKILLS` | bool | `0` | Enable lazy skill loading and the `SearchSkills` discovery tool. `1` removes the skill catalog from the `InvokeSkill` description and points the agent at search instead; built-in skills stay listed. Any value other than `0` enables. |
-| `SKILL_LIST_INCLUDE` | text | empty | Comma-separated glob patterns of skills to list. Empty = list all. Independently of this switch; when it hides skills, `SearchSkills` auto-enables. |
-| `SKILL_LIST_EXCLUDE` | text | empty | Comma-separated glob patterns of skills to hide from the list. |
-| `SKILL_LIST_INCLUDE_FILE` / `SKILL_LIST_EXCLUDE_FILE` | text | empty | The same patterns, one per line, read from a file. |
-| `SKILL_LIST_TOP_PERCENT` | text | `0` | Keep only the top N% of skills by usage across past sessions. `0` = off; fails open (lists all) when there is no usage data. |
-| `SKILL_LIST_STYLE` | choice | `full` | `full` = name plus description; `names` = names only. |
+| | Catalog mode (default) | Lazy mode (`TOOL_SEARCHSKILLS=1`) |
+|---|---|---|
+| What the prompt carries | Every skill's name + description, every request | A 167-byte pointer to search |
+| Discovery | Already visible | One `SearchSkills` call when needed |
+| Cost profile | Standing bytes per request, growing with the library | One discovery round-trip per unfamiliar task |
+| Prompt cache | Big tool surface rewrites the cached prefix when the library changes | Stable prefix; the library can move under you |
+| Best for | Small, hot libraries | Large libraries, cache-sensitive endpoints |
 
-`TOOL_SEARCHSKILLS` lives in the **Tools** section of the config editor. All of the keys above can be set in any cascade tier, in a profile overlay, or as OS environment variables — the highest tier that sets each one wins.
+Both modes share the same floor: every skill remains invokable by name, and required skills are guaranteed to load regardless.
 
----
-
-## Gotchas
-
-- **Lazy mode is opt-in and stays opt-in.** `TOOL_SEARCHSKILLS=0` is the shipped value, the compiled-in default, and the tool's own disabled-by-default flag. If you expected the catalog to vanish and it did not, check `scorpiox-config --get TOOL_SEARCHSKILLS` and remember an OS environment variable outranks every file.
-- **Empty means two different things depending on where you set it.** An empty OS environment variable is ignored (the cascade falls through to the files), but an empty value *in a file* is a stored value — and any stored value other than `0` turns the tool on. Comment the line out or write `0` explicitly; do not rely on `TOOL_SEARCHSKILLS=`.
-- **The editor's `1` is not a default.** The Tools-section row is gated on `TOOLS`; that number is the visibility rule, not a recommended value. Runtime defaults are `0` everywhere that matters.
-- **Built-ins never go lazy.** The compiled-in skills stay listed in lazy mode by design — they are the small, universal procedures every session benefits from seeing. What leaves the prompt is your project, user, and additional skills.
-- **An empty pattern is a listing, not a search.** `SearchSkills` with `pattern: ""` returns every skill and skips grep entirely. When a search returns the whole library, the usual cause is a pattern that arrived empty rather than a grep that matched everything.
-- **The description is still the trigger.** In lazy mode the agent finds skills by matching text against descriptions and bodies. A vague description is invisible in both modes, but in lazy mode there is no catalog to compensate for it — write `Use when ...` triggers the way you would for a search engine.
-- **Discovery costs a turn only when the agent thinks to search.** Lazy mode shifts responsibility for finding skills from the harness to the model. Required skills are the safety net for the ones that must never be skipped.
-- **No `SearchSkills` in the browser build.** The grep runs as a subprocess; WASM cannot spawn one, so the tool is force-disabled there and the catalog is the only discovery surface.
-
----
-
-## The bottom line
-
-Lazy skill loading is a prompt-size decision, not a capability one. The catalog is a cost you pay on every request for the chance that the agent reaches for a skill unprompted; lazy mode trades that standing cost for a grep-backed search the agent runs when a task actually calls for it. If your library is large, your sessions are long, or your cache is precious, flip `TOOL_SEARCHSKILLS=1` and let `SearchSkills` carry the index. If your handful of skills is in constant use, leave the catalog on — visibility you can rely on is worth the bytes.
-
----
-
-## Related
-
-- [Skills in SCORPIOX CODE](skills-system.md) — the on-demand architecture this page tunes: where skills live, how they load, and the required-skills contract.
-- [Configuration and Profiles](scorpiox-env.md) — the cascade every key above is read through, and `/profile` vs `/use`.
-- [Deterministic File Editing & Developer Autonomy](file-editing.md) — `scorpiox-grep` itself, the engine behind the search.
-- [Native MCP 2.0 and OAuth 2.1](mcp.md) — a different tool surface with its own discovery story.
+See [Skills System](skills-system.md) for the full architecture — folders, cascade, filters, and the required-skills contract that keeps lazy mode safe.

@@ -4,7 +4,7 @@ Every request SCORPIOX CODE sends to an OpenAI-compatible endpoint can carry a s
 
 The whole feature is one config key: **`OPENAI_EXTRA_HEADERS`**. It ships with a sensible default (two `X-Sx-*` headers naming your session and thread), it accepts any additional headers you want, and it is the single switch for turning identity headers off completely.
 
-Docs for SCORPIOX CODE @ `e30b171`.
+Docs for SCORPIOX CODE @ `655c38f`.
 
 > **The whole idea in one line:** with `PROVIDER=openai`, SCORPIOX CODE stamps every outgoing request with `X-Sx-Session-Id` and `X-Sx-Thread-Id` — a per-session GUID and a per-conversation-lineage GUID — and lets you add, rename, or remove all of it through one key.
 
@@ -26,7 +26,7 @@ Both values are **UUIDs generated on your machine**. Nothing is fetched, nothing
 | `X-Sx-Session-Id` | A UUIDv4 generated when the session is created, stored in that session's `meta.json` | One session — a new session folder means a new value |
 | `X-Sx-Thread-Id` | A UUIDv4 naming the *conversation lineage* the session belongs to | The whole lineage — see [Session vs. thread](#session-vs-thread-why-there-are-two-ids) |
 
-Both GUIDs live in the session's `meta.json` next to the model, provider, and profile, so a session resumed later carries the same identity it had when it was created. If you open a session that predates this feature, SCORPIOX CODE generates GUIDs for it once and writes them back into `meta.json`, so older sessions get stable identity too.
+Both GUIDs live in the session's `meta.json` next to the model, provider, and profile, so a session resumed later carries the same identity it had when it was created. If you open a session that predates this feature, SCORPIOX CODE generates GUIDs for it once and writes them back, so older sessions get stable identity too.
 
 ---
 
@@ -51,9 +51,7 @@ Three placeholders are supported, each substituted **per request**, just before 
 | `{session_id}` | The session's human-readable ID, the same name as the session folder (for example `2026_10_02_quiet_tesla`) | Populated when session file logging has been initialized for the run. |
 | *(unknown tokens)* | Left as literal text | `{anything_else}` is not a known placeholder and is sent verbatim. |
 
-A pair whose value ends up empty is dropped, so a header configured to a placeholder that resolves to nothing is never sent as `Header:` with an empty value — the pair disappears quietly.
-
-### Adding your own headers
+### Custom headers
 
 Add anything you like after the defaults — static values or placeholder-bearing values:
 
@@ -75,7 +73,7 @@ The list is processed left to right. Whitespace around a pair is tolerated (`Nam
 
 Two identifiers sound redundant until you watch a long task run. They answer different questions:
 
-- **The session GUID answers "which session folder is this?"** It is generated fresh for every new session — a fresh launch, `/clear`, and an automatic or manual compaction all produce a new one. It matches the session's entry in `meta.json` and the folder under `.scorpiox/sessions/`.
+- **The session GUID answers "which session folder is this?"** It is generated fresh for every new session — `/clear`, a fresh launch, an automatic compaction, all produce a new one. It matches the session's entry in `meta.json` and the folder under `.scorpiox/sessions/`.
 - **The thread GUID answers "which conversation lineage is this?"** It is the continuity anchor. A brand-new session starts (roots) a new thread, and a session that has been compacted or resumed **keeps the same thread GUID** as the session it continued from, so every request across that whole run reports one consistent thread. Legacy sessions without a thread GUID fall back to their session GUID when the lineage is carried forward.
 
 The practical difference shows up in what a provider sees:
@@ -107,24 +105,15 @@ The behavior is fail-safe in the boring direction: anything questionable is drop
 
 ---
 
-## Opting out: sending no identity headers at all
+## Turning identity headers off
 
-Setting the key to empty disables the feature entirely — no `X-Sx-Session-Id`, no `X-Sx-Thread-Id`, no custom headers. The request goes out with exactly what the endpoint requires and nothing more.
+Opting out means setting `OPENAI_EXTRA_HEADERS` to **empty** (zero pairs). The key is then read as an empty string, nothing is resolved, and no identity headers are attached — not the two defaults, not any extras.
 
-### The quick way
-
-Add one line to your project config:
-
-```ini
-# .scorpiox/scorpiox-env.txt
+```
 OPENAI_EXTRA_HEADERS=
 ```
 
-An empty value means "send nothing extra" — the key's comment in `scorpiox-env.txt` says exactly that: *Empty = send nothing (opt out of session tracking).*
-
-### The durable way
-
-Put the same line in the tier that matches how long you want the opt-out to last. See [Configuration and Profiles](scorpiox-env.md) for the full cascade — highest tier wins per key:
+Where to set it depends on scope:
 
 | You want… | Put `OPENAI_EXTRA_HEADERS=` in |
 |-----------|-------------------------------|
@@ -183,12 +172,12 @@ The openai provider is the only one that takes its headers from `OPENAI_EXTRA_HE
 |----------|----------------------------------|-----------------|
 | **openai** | `X-Sx-Session-Id:{session_guid}`, `X-Sx-Thread-Id:{thread_guid}` by default; anything else you configure | **You** — via `OPENAI_EXTRA_HEADERS`, including the opt-out |
 | **grok** | Fixed session-affinity headers: `x-grok-session-id` and `x-grok-conv-id` (the same generated UUID, held for the provider's lifetime) plus `x-grok-turn-idx`, and the same UUID as the `prompt_cache_key` field in the body to pin requests onto a warm KV cache | The provider — fixed names and values, no config surface |
-| **opencode** | Required session headers: `x-opencode-session` (required on inference; auto-generated `ses_...` id, or your `OPENCODE_SESSION_ID` override), `x-opencode-request` (per-call), `x-opencode-client: cli`, `x-opencode-project: global` | The provider, with one override key (`OPENCODE_SESSION_ID`) |
+| **opencode** | A required `x-opencode-session` header (plus `x-opencode-request` and `x-opencode-client`) in the endpoint's official identifier format, generated per provider or taken from `OPENCODE_SESSION_ID` | The provider — mandatory for inference, not optional |
 
 Two things are worth taking from that table:
 
-- **Grok's headers exist for the cache, not for you.** The session/conversation pair is what keeps consecutive turns landing on a warm prompt cache (measured on a 15.6K-token prompt: no session key means nothing is cached turn to turn; with the key, the full prompt is cached from the second turn). Those names cannot be renamed and cannot be suppressed from `OPENAI_EXTRA_HEADERS` — they are part of how the Grok provider talks to its endpoint. See [Using Grok Build Subscription](grok-provider.md).
-- **OpenCode's session header is a requirement, not a decoration.** The endpoint rejects inference requests without `x-opencode-session`, which is why that provider generates one (or takes your `OPENCODE_SESSION_ID`) and sends it on every call. See [Using OpenCode Zen Subscription](opencode-provider.md).
+- **Grok's headers exist for the cache, not for you.** The session/conversation pair is what keeps consecutive turns landing on a warm prompt cache. Those names cannot be renamed and cannot be suppressed from `OPENAI_EXTRA_HEADERS` — they are part of how the Grok provider talks to its endpoint. See [Using Grok Build Subscription](grok-provider.md).
+- **OpenCode's session header is a requirement, not a decoration.** The endpoint rejects inference requests without `x-opencode-session`, which is why that provider generates one (or takes your `OPENCODE_SESSION_ID`) and sends it on every call.
 
 If you need uniform identity headers across providers — the same two names on every backend — that is what `OPENAI_EXTRA_HEADERS` gives you on the openai provider, and why the default names are deliberately neutral (`X-Sx-*`) rather than tied to one vendor.
 
@@ -220,6 +209,3 @@ It lives in the **Provider & Authentication** section of the config editor and i
 - [Using the OpenAI Provider](openai-provider.md) — the provider these headers travel on.
 - [Configuration and Profiles](scorpiox-env.md) — the cascade, tiers, and `/profile` vs `/use`.
 - [Privacy Architecture and Zero Data Collection](data-privacy.md) — where session data lives and what leaves your machine.
-- [API Traffic Logging and Complete Remote Call Transparency](traffic-logging.md) — the verbatim capture of every request.
-- [Using Grok Build Subscription](grok-provider.md) — session affinity for prompt-cache hits on the Grok provider.
-- [Using OpenCode Zen Subscription](opencode-provider.md) — the required session header on OpenCode.

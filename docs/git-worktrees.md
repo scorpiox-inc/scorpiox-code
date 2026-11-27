@@ -6,7 +6,7 @@ SCORPIOX CODE's session manager, `scorpiox-tmux`, solves this for you automatica
 
 A worktree is git's native way of checking out the same repository into a second directory that shares the history but has its own working files and its own branch. That is exactly the unit of isolation an agent needs: a real, separate working directory that never touches the one the other agents are using.
 
-Docs for SCORPIOX CODE @ `62c4a90`.
+Docs for SCORPIOX CODE @ `655c38f`.
 
 > **The whole idea in one line:** name a session, and SCORPIOX CODE gives it a private git worktree — its own directory, its own branch, its own session store — so parallel agents on one repo never collide, and a session can still find the sessions it needs from the main checkout later.
 
@@ -51,7 +51,6 @@ The common case. A named session on a git repo gets a worktree.
 If you point a session at a folder with an absolute path — anything starting with `/`, `~`, `./`, or a Windows drive letter — SCORPIOX CODE uses that folder exactly as it is. **No worktree is created, even if the folder happens to be a git repository.** A plain folder was always meant to be run in place, so that is the intended behaviour, not a bug. The session is still recorded so `--list` and the bot API can find where it lives.
 
 ```
-/new /tmp/scratch:s1        # direct folder, no worktree
 scorpiox-tmux --new /tmp/scratch --name s1
 ```
 
@@ -71,8 +70,10 @@ Where the worktree lands is deterministic, and you can see it:
 - **Default location:** a `.worktrees` folder *beside the repository*. For a repo at `/codebases/myapp`, a session `fix-login` becomes:
 
   ```
-  /codebases/myapp/.worktrees/myapp-fix-login
+  /codebases/.worktrees/myapp-fix-login
   ```
+
+  The folder is the repository's parent directory plus `.worktrees`, and the leaf is always `<project>-<session>`, so two sessions on the same repo get two distinct directories that never overlap.
 
 - **The branch** is named after the session (`fix-login`), so each worktree is on its own branch and the worktrees never fight over a branch checkout.
 
@@ -180,11 +181,11 @@ Check which session is in which worktree at any time with `scorpiox-tmux --list`
 
 ---
 
-## Cross-references
+## See also
 
 - [Managing Agent Sessions with scorpiox-tmux](scorpiox-tmux.md) — the full session lifecycle: launching, watching, sending input, restarting, killing, and the dashboard. This page covers only the git worktree isolation layer that `scorpiox-tmux` provides for named sessions.
 - [Configuration and Profiles](scorpiox-env.md) — the `scorpiox-env.txt` cascade, where `TMUX_WORKTREE_BASE` and the other `TMUX_` keys live, and how profiles apply to per-session settings.
 
 ---
 
-*Docs for SCORPIOX CODE @ `62c4a90`. Session lifecycle and command reference are covered in [Managing Agent Sessions](scorpiox-tmux.md).*
+*Docs for SCORPIOX CODE @ `655c38f`. Session lifecycle and command reference are covered in [Managing Agent Sessions](scorpiox-tmux.md).*
