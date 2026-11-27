@@ -6,8 +6,8 @@ High-performance native coding assistant with 100% local filesystem sessions.
 
 ## Architecture & Systems Engineering Truth
 
-- **93,000 lines of pure hand-crafted C99.** No runtime, no interpreter, no JIT.
-- **78 standalone native C binaries.** Each capability compiles to its own self-contained executable target.
+- **211,000 lines of pure hand-crafted C.** No runtime, no interpreter, no JIT.
+- **119 standalone native C binaries.** Each capability compiles to its own self-contained executable target.
 - **Zero dependencies.** No Node.js, no Python, no Electron, no `npm` packages, no package manager.
 - **Sub-millisecond CLI startup.** No cold-start tax, no garbage collector, no VM warm-up.
 - **100% local filesystem sessions.** Raw JSON transcripts on disk. Complete offline auditability, replay, and wire-level traffic logging.
@@ -83,8 +83,6 @@ Extended guides:
 | Guide | Description |
 |---|---|
 | [docs/git-worktrees.md](docs/git-worktrees.md) | Isolated git worktrees for parallel agent sessions |
-| [docs/reasoning-effort.md](docs/reasoning-effort.md) | Reasoning effort control |
-| [docs/lazy-skill-loading.md](docs/lazy-skill-loading.md) | Lazy skill loading |
 | [docs/identity-headers.md](docs/identity-headers.md) | Session identity headers |
 | [docs/sub-agents.md](docs/sub-agents.md) | Sub-agents and agent swarms |
 | [docs/scorpiox-server.md](docs/scorpiox-server.md) | Serving sites with scorpiox-server |
@@ -98,6 +96,8 @@ Extended guides:
 | [docs/bot-plugins.md](docs/bot-plugins.md) | Plugins in SCORPIOX BOT (BotMarket) |
 | [docs/bot-preview.md](docs/bot-preview.md) | Live artifact preview in SCORPIOX BOT chat |
 | [docs/bot-vnc.md](docs/bot-vnc.md) | Live VNC desktops in SCORPIOX BOT chat |
+| [docs/lazy-skill-loading.md](docs/lazy-skill-loading.md) | Lazy skill loading for reduced cold-start |
+| [docs/reasoning-effort.md](docs/reasoning-effort.md) | Controlling model reasoning effort |
 
 ---
 
